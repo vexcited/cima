@@ -95,6 +95,7 @@ each(type, json_items(json_get(args, "resourceTypes"))) { ... }
 
 cima_json *copy = json_clone(a, json_obj("id", id));               // a builder kept past its block
 json_set(a, copy, "_denormUpsertIsTombstone_", false);             // set, insert, remove, append
+json_obj_push(a, copy, key, node);                                  // no lookup, no key copy, for big objects
 json_eq(old, now);                                                  // deep, key order and 1 vs 1.0 do not matter
 each(change, json_diff(a, old, now)) { ... }                        // added, changed and removed keys, livegraph style
 json_patch(a, old, now);                                            // `now` with the keys it lost set to null
@@ -171,6 +172,15 @@ Homebrew build on macOS and Debian's package on Linux, found by CMake only when 
 | typed parse, `cima_parse_json` | 2005 us, 1205 MB/s | 1799 us, 1342 MB/s | 1831 us, 1319 MB/s | 1705 us, 1417 MB/s |
 | validate only, `cima_json_valid` | 1040 us, 2323 MB/s | 968 us, 2494 MB/s | 1122 us, 2152 MB/s | 1020 us, 2367 MB/s |
 | `yyjson_read`, for comparison | 777 us, 3107 MB/s | | 1289 us, 1873 MB/s | |
+
+`json_set` looks for its key before it appends a copy of it, so an object built with it costs a scan of its
+members per member. `json_obj_push` appends the member as is: the key is borrowed, a literal or a string in the
+arena, and must not be in the object yet, which a map from ids to nodes knows already. Keys are made beforehand:
+
+| an object built member by member | macOS, 100 members | macOS, 10 000 members, 130 KB |
+| --- | --- | --- |
+| `json_set`, a lookup and a key copy | 18.1 us | 105 211 us, 1 MB/s |
+| `json_obj_push`, appended as is | 0.8 us | 105 us, 1241 MB/s |
 
 macOS 27 with Apple clang 21, Linux 6 arm64 with Debian trixie and clang 19 in Docker's virtual machine, both on
 an Apple M4 Pro.

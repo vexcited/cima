@@ -76,6 +76,7 @@
 #undef json_set
 #undef json_insert
 #undef json_append
+#undef json_obj_push
 #undef json_remove
 #undef json_remove_at
 #undef json_eq

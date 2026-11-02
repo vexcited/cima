@@ -903,6 +903,17 @@ cima_json *cima_json_insert(cilo_arena *a, cima_json *o, size_t index, const cha
   return &m->value;
 }
 
+cima_json *cima_json_obj_push(cilo_arena *a, cima_json *o, const char *key, const cima_json *value) {
+  if (!o || o->type != CIMA_JSON_OBJECT) return nullptr;
+  grow(a, o, sizeof(cima_json_member), alignof(cima_json_member));
+  size_t len = strlen(key);
+  cima_json_member *m = &o->members[o->len++];
+  *m = (cima_json_member){.key = key, .key_len = (uint32_t)len, .value = value ? *value : (cima_json){}};
+  m->flags = clean_text(key, len) ? CIMA_JSON__CLEAN : 0;
+  keep(a, &m->value, false);
+  return &m->value;
+}
+
 bool cima_json_remove(cima_json *o, const char *key) {
   if (!o || o->type != CIMA_JSON_OBJECT) return false;
   ptrdiff_t i = find_member(o, key, strlen(key));

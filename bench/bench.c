@@ -316,9 +316,46 @@ static void run_font_index(int files, int iterations) {
   }
 }
 
+/* ========================================================================================================== */
+/* a big object built member by member, as a map from ids to nodes is.                                       */
+/* ========================================================================================================== */
+
+static void run_build(int members, int iterations) {
+  with_arena(data) {
+    const char **keys = new_array(data, const char *, members);
+    for (int i = 0; i < members; i++) keys[i] = aprintf(data, "%d:%d", i / 64, i % 64);
+    cilo_arena work = {};
+    size_t len = 0;
+    with_arena(once) {
+      cima_json *o = json_clone(once, json_obj());
+      for (int i = 0; i < members; i++) json_obj_push(once, o, keys[i], i);
+      cima_json_text(CILO_OF(once), o, &len);
+    }
+    printf("\nan object of %d members, %zu bytes. microseconds per run, and MB/s of json.\n\n", members, len);
+    printf("| %-38s | %10s | %8s |\n", "operation", "us", "MB/s");
+    printf("| %-38s | %10s | %8s |\n", "--------------------------------------", "----------", "--------");
+    double ns;
+    MEASURE(ns, iterations, rewinding(&work) {
+      cima_json *o = json_clone(&work, json_obj());
+      for (int i = 0; i < members; i++) json_set(&work, o, keys[i], i);
+      sink += json_len(o);
+    });
+    row("json_set, a lookup and a key copy", ns, len);
+    MEASURE(ns, iterations, rewinding(&work) {
+      cima_json *o = json_clone(&work, json_obj());
+      for (int i = 0; i < members; i++) json_obj_push(&work, o, keys[i], i);
+      sink += json_len(o);
+    });
+    row("json_obj_push, appended as is", ns, len);
+    cilo_arena_drop(&work);
+  }
+}
+
 int main(void) {
   run(1, 20000);
   run(100, 300);
   run_font_index(3000, 50);
+  run_build(100, 20000);
+  run_build(10000, 20);
   return sink == 0;
 }

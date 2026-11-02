@@ -79,6 +79,36 @@ static void changing(void) {
   }
 }
 
+static void pushing(void) {
+  with_arena(a) {
+    // members appended in order without a lookup, onto a parsed object, a builder and a fresh one.
+    cima_json *doc = parse(a, "{\"a\": 1}");
+    json_obj_push(a, doc, "b", 2);
+    json_obj_push(a, doc, "c", json_arr("x"));
+    CHECK_STR(json_text(a, doc), "{\"a\":1,\"b\":2,\"c\":[\"x\"]}");
+    cima_json *built = json_obj("id", 7);
+    json_obj_push(a, built, "name", "ada");
+    CHECK_STR(json_text(a, built), "{\"id\":7,\"name\":\"ada\"}");
+    cima_json *big = json_clone(a, json_obj());
+    char **keys = new_array(a, char *, 1000);
+    for (int i = 0; i < 1000; i++) {
+      keys[i] = aprintf(a, "k%d", i);
+      json_obj_push(a, big, keys[i], i);
+    }
+    CHECK(json_len(big) == 1000 && json_or(json_get(big, "k0"), -1) == 0 && json_or(json_get(big, "k999"), -1) == 999);
+    // the key is borrowed, not copied.
+    CHECK(json_members(big).items[5].key == keys[5]);
+    // a repeated key reads as the last one, and both are written.
+    json_obj_push(a, doc, "b", 3);
+    CHECK(json_or(json_get(doc, "b"), 0) == 3);
+    CHECK_STR(json_text(a, doc), "{\"a\":1,\"b\":2,\"c\":[\"x\"],\"b\":3}");
+    // a key that needs escaping stays escaped.
+    json_obj_push(a, doc, "q\"", true);
+    CHECK(strstr(json_text(a, doc), "\"q\\\"\":true") != nullptr);
+    CHECK(!json_obj_push(a, json_arr(), "x", 1) && !json_obj_push(a, nullptr, "x", 1));
+  }
+}
+
 static void building(void) {
   with_arena(a) {
     User user = {.id = 7, .handle = "ada"};
@@ -404,6 +434,7 @@ int main(void) {
   formatting();
   reading();
   changing();
+  pushing();
   building();
   writing();
   comparing();

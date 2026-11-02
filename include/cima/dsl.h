@@ -82,6 +82,7 @@
 #define json_set(...)           CIMA_JSON_SET(__VA_ARGS__)
 #define json_insert(...)        CIMA_JSON_INSERT(__VA_ARGS__)
 #define json_append(...)        CIMA_JSON_APPEND(__VA_ARGS__)
+#define json_obj_push(...)      CIMA_JSON_OBJ_PUSH(__VA_ARGS__)
 #define json_remove(...)        cima_json_remove(__VA_ARGS__)
 #define json_remove_at(...)     cima_json_remove_at(__VA_ARGS__)
 #define json_eq(...)            cima_json_eq(__VA_ARGS__)

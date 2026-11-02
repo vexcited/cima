@@ -219,6 +219,10 @@ cima_json *cima_json_clone(cilo_arena *a, const cima_json *v);
 cima_json *cima_json_set(cilo_arena *a, cima_json *object, const char *key, const cima_json *value);
 // inserts `key` at `index`, clamped to the end. an existing `key` is removed first.
 cima_json *cima_json_insert(cilo_arena *a, cima_json *object, size_t index, const char *key, const cima_json *value);
+// appends `key` without looking for it and without copying it, for building big objects: the caller knows it is
+// not there yet, or reads get the last one and both are written, and it outlives the object, a literal or a
+// string in `a`. returns the stored node.
+cima_json *cima_json_obj_push(cilo_arena *a, cima_json *object, const char *key, const cima_json *value);
 bool cima_json_remove(cima_json *object, const char *key);
 cima_json *cima_json_append(cilo_arena *a, cima_json *array, const cima_json *value);
 bool cima_json_remove_at(cima_json *array, size_t index);
@@ -226,6 +230,7 @@ bool cima_json_remove_at(cima_json *array, size_t index);
 #define CIMA_JSON_SET(a, object, key, x) cima_json_set(a, object, key, CIMA_JSON_OF(x))
 #define CIMA_JSON_INSERT(a, object, index, key, x) cima_json_insert(a, object, index, key, CIMA_JSON_OF(x))
 #define CIMA_JSON_APPEND(a, array, x) cima_json_append(a, array, CIMA_JSON_OF(x))
+#define CIMA_JSON_OBJ_PUSH(a, object, key, x) cima_json_obj_push(a, object, key, CIMA_JSON_OF(x))
 
 /* comparing. */
 
