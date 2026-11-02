@@ -752,7 +752,7 @@ static void parse_value(cima_ctx *c, const cima_schema *s, void *out) {
           return;
         }
       } else {
-        memcpy(buf, str.ptr, len = str.len);
+        cima__copy(buf, str.ptr, len = str.len);
       }
       finish_string(c, s, buf, len, cap, out);
       break;

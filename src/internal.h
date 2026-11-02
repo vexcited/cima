@@ -51,6 +51,40 @@ static inline uint64_t cima__load64(const char *p) {
   return v;
 }
 
+static inline uint32_t cima__load32(const char *p) {
+  uint32_t v;
+  memcpy(&v, p, 4);
+  return v;
+}
+
+// short keys and strings compared and copied without a call: two overlapping words cover up to 16 bytes and
+// never touch a byte past `len`.
+static inline bool cima__same(const char *a, const char *b, size_t len) {
+  if (len > 16) return memcmp(a, b, len) == 0;
+  if (len >= 8) return cima__load64(a) == cima__load64(b) && cima__load64(a + len - 8) == cima__load64(b + len - 8);
+  if (len >= 4) return cima__load32(a) == cima__load32(b) && cima__load32(a + len - 4) == cima__load32(b + len - 4);
+  return !len || (a[0] == b[0] && a[len / 2] == b[len / 2] && a[len - 1] == b[len - 1]);
+}
+
+static inline void cima__copy(char *dst, const char *src, size_t len) {
+  if (len > 16) {
+    memcpy(dst, src, len);
+  } else if (len >= 8) {
+    uint64_t head = cima__load64(src), tail = cima__load64(src + len - 8);
+    memcpy(dst, &head, 8);
+    memcpy(dst + len - 8, &tail, 8);
+  } else if (len >= 4) {
+    uint32_t head = cima__load32(src), tail = cima__load32(src + len - 4);
+    memcpy(dst, &head, 4);
+    memcpy(dst + len - 4, &tail, 4);
+  } else if (len) {
+    char first = src[0], middle = src[len / 2], last = src[len - 1];
+    dst[0] = first;
+    dst[len / 2] = middle;
+    dst[len - 1] = last;
+  }
+}
+
 static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "the string scanners read words little endian");
 
 constexpr uint64_t CIMA__ONES = 0x0101010101010101ull;
@@ -85,77 +119,35 @@ typedef struct cima__str {
   bool escaped;
 } cima__str;
 
+// the scan of a string that needs more than the inlined part, from `p` on. everything from `start` to `p` is plain.
+const char *cima__scan_string_rest(const char *start, const char *p, const char *end, cima__str *out,
+                                   const char **err);
+
 // scans a string whose opening quote is at p. returns what follows the closing quote, or null with `*err` set.
 // escapes, surrogate pairs and utf-8 are validated here, so decoding them later cannot fail.
 static inline const char *cima__scan_string(const char *p, const char *end, cima__str *out, const char **err) {
+  return cima__scan_string_rest(p + 1, p + 1, end, out, err);
+}
+
+// the same with plain ascii, most keys and strings, found eight bytes at a time without leaving the caller. it
+// pays in the dom and the skipper, the typed parser is faster calling out. on an m4, neon compares lose to these
+// words for short strings: moving a vector mask to a register costs more than the scan.
+static inline const char *cima__scan_string_inline(const char *p, const char *end, cima__str *out,
+                                                   const char **err) {
   const char *start = ++p;
-  bool escaped = false;
-  for (;;) {
-    while (end - p >= 8) {
-      uint64_t m = cima__special(cima__load64(p)) & CIMA__HIGHS;
-      if (m) {
-        p += __builtin_ctzll(m) >> 3;
-        goto special;
+  while (LIKELY(end - p >= 8)) {
+    uint64_t m = cima__special(cima__load64(p)) & CIMA__HIGHS;
+    if (m) {
+      p += __builtin_ctzll(m) >> 3;
+      if (LIKELY(*p == '"')) {
+        *out = (cima__str){start, (size_t)(p - start), false};
+        return p + 1;
       }
-      p += 8;
+      break;
     }
-    while (p < end && (unsigned char)*p >= 0x20 && *p != '"' && *p != '\\' && (unsigned char)*p < 0x80) p++;
-    if (p >= end) {
-      *err = "unterminated string";
-      return nullptr;
-    }
-  special:;
-    unsigned char c = (unsigned char)*p;
-    if (c == '"') {
-      *out = (cima__str){start, (size_t)(p - start), escaped};
-      return p + 1;
-    }
-    if (c == '\\') {
-      escaped = true;
-      if (p + 1 >= end) {
-        *err = "unterminated string";
-        return nullptr;
-      }
-      switch (p[1]) {
-      case '"': case '\\': case '/': case 'b': case 'f': case 'n': case 'r': case 't':
-        p += 2;
-        continue;
-      case 'u': {
-        if (end - p < 6) break;
-        int32_t u = cima__hex4(p + 2);
-        if (u < 0) break;
-        p += 6;
-        if (u >= 0xdc00 && u <= 0xdfff) {
-          *err = "lone low surrogate";
-          return nullptr;
-        }
-        if (u >= 0xd800 && u <= 0xdbff) {
-          int32_t lo = end - p >= 6 && p[0] == '\\' && p[1] == 'u' ? cima__hex4(p + 2) : -1;
-          if (lo < 0xdc00 || lo > 0xdfff) {
-            *err = "lone high surrogate";
-            return nullptr;
-          }
-          p += 6;
-        }
-        continue;
-      }
-      default:
-        break;
-      }
-      *err = "invalid escape";
-      return nullptr;
-    }
-    if (c < 0x20) {
-      *err = "control character in string";
-      return nullptr;
-    }
-    size_t n = cima__utf8_seq((const unsigned char *)p, (const unsigned char *)end);
-    if (!n) {
-      *err = "invalid utf-8";
-      return nullptr;
-    }
-    p += n;
+    p += 8;
   }
+  return cima__scan_string_rest(start, p, end, out, err);
 }
 
 static inline char *cima__put_utf8(char *d, uint32_t u) {

@@ -160,17 +160,17 @@ const cima__object_info *cima__object_info_of(const cima_schema *s) {
 }
 
 ptrdiff_t cima__find_field(const cima__object_info *info, const char *key, size_t len, size_t hint) {
-  if (hint < info->count && info->lens[hint] == len && memcmp(info->names[hint], key, len) == 0)
+  if (hint < info->count && info->lens[hint] == len && cima__same(info->names[hint], key, len))
     return (ptrdiff_t)hint;
   if (info->slots) {
     for (uint32_t h = (uint32_t)cima__hash(key, len) & info->mask; info->slots[h]; h = (h + 1) & info->mask) {
       uint32_t i = info->slots[h] - 1;
-      if (info->lens[i] == len && memcmp(info->names[i], key, len) == 0) return i;
+      if (info->lens[i] == len && cima__same(info->names[i], key, len)) return i;
     }
     return -1;
   }
   for (size_t i = 0; i < info->count; i++)
-    if (info->lens[i] == len && memcmp(info->names[i], key, len) == 0) return (ptrdiff_t)i;
+    if (info->lens[i] == len && cima__same(info->names[i], key, len)) return (ptrdiff_t)i;
   return -1;
 }
 

@@ -266,6 +266,77 @@ char *cima_json_pretty(cilo_allocator *a, const cima_json *v, size_t *len) {
 /* validation without a dom, for skipping values.                                                             */
 /* ========================================================================================================== */
 
+const char *cima__scan_string_rest(const char *start, const char *p, const char *end, cima__str *out,
+                                   const char **err) {
+  bool escaped = false;
+  for (;;) {
+    while (end - p >= 8) {
+      uint64_t m = cima__special(cima__load64(p)) & CIMA__HIGHS;
+      if (m) {
+        p += __builtin_ctzll(m) >> 3;
+        goto special;
+      }
+      p += 8;
+    }
+    while (p < end && (unsigned char)*p >= 0x20 && *p != '"' && *p != '\\' && (unsigned char)*p < 0x80) p++;
+    if (p >= end) {
+      *err = "unterminated string";
+      return nullptr;
+    }
+  special:;
+    unsigned char c = (unsigned char)*p;
+    if (c == '"') {
+      *out = (cima__str){start, (size_t)(p - start), escaped};
+      return p + 1;
+    }
+    if (c == '\\') {
+      escaped = true;
+      if (p + 1 >= end) {
+        *err = "unterminated string";
+        return nullptr;
+      }
+      switch (p[1]) {
+      case '"': case '\\': case '/': case 'b': case 'f': case 'n': case 'r': case 't':
+        p += 2;
+        continue;
+      case 'u': {
+        if (end - p < 6) break;
+        int32_t u = cima__hex4(p + 2);
+        if (u < 0) break;
+        p += 6;
+        if (u >= 0xdc00 && u <= 0xdfff) {
+          *err = "lone low surrogate";
+          return nullptr;
+        }
+        if (u >= 0xd800 && u <= 0xdbff) {
+          int32_t lo = end - p >= 6 && p[0] == '\\' && p[1] == 'u' ? cima__hex4(p + 2) : -1;
+          if (lo < 0xdc00 || lo > 0xdfff) {
+            *err = "lone high surrogate";
+            return nullptr;
+          }
+          p += 6;
+        }
+        continue;
+      }
+      default:
+        break;
+      }
+      *err = "invalid escape";
+      return nullptr;
+    }
+    if (c < 0x20) {
+      *err = "control character in string";
+      return nullptr;
+    }
+    size_t n = cima__utf8_seq((const unsigned char *)p, (const unsigned char *)end);
+    if (!n) {
+      *err = "invalid utf-8";
+      return nullptr;
+    }
+    p += n;
+  }
+}
+
 static const char *literal(const char *p, const char *end, const char *word, size_t n) {
   return (size_t)(end - p) >= n && memcmp(p, word, n) == 0 ? p + n : nullptr;
 }
@@ -276,7 +347,7 @@ const char *cima__skip(const char *p, const char *end, uint32_t depth, cima__lex
   switch (*p) {
   case '"': {
     cima__str s;
-    const char *q = cima__scan_string(p, end, &s, &err->msg);
+    const char *q = cima__scan_string_inline(p, end, &s, &err->msg);
     if (!q) err->at = p;
     return q;
   }
@@ -291,7 +362,7 @@ const char *cima__skip(const char *p, const char *end, uint32_t depth, cima__lex
       if (object) {
         if (p >= end || *p != '"') return err->at = p, err->msg = "expected a key", nullptr;
         cima__str s;
-        const char *q = cima__scan_string(p, end, &s, &err->msg);
+        const char *q = cima__scan_string_inline(p, end, &s, &err->msg);
         if (!q) return err->at = p, nullptr;
         p = cima__ws(q, end);
         if (p >= end || *p != ':') return err->at = p, err->msg = "expected ':'", nullptr;
