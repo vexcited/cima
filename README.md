@@ -153,22 +153,62 @@ and a listing of 100 files, 156 KB. Microseconds per run, and MB/s of JSON.
 
 | operation | macOS, 1 file | macOS, 100 files | Linux, 1 file | Linux, 100 files |
 | --- | --- | --- | --- | --- |
-| typed parse, `cima_parse_json` | 1.0 us | 94 us, 1671 MB/s | 1.2 us | 115 us, 1357 MB/s |
-| typed encode, `cima_to_json` | 0.6 us | 61 us, 2581 MB/s | 0.6 us | 59 us, 2668 MB/s |
-| DOM parse, `json_parse` | 0.8 us | 81 us, 1941 MB/s | 1.0 us | 99 us, 1577 MB/s |
-| DOM write, `json_text` | 0.4 us | 43 us, 3629 MB/s | 0.4 us | 44 us, 3558 MB/s |
-| builder envelope around a typed value | 0.6 us | 61 us, 2547 MB/s | 0.6 us | 61 us, 2576 MB/s |
-| validate only, `cima_json_valid` | 0.4 us | 45 us, 3474 MB/s | 0.5 us | 50 us, 3119 MB/s |
-| DOM parse, edit and diff one object | 2.2 us | 92 us, 1707 MB/s | 2.8 us | 99 us, 1578 MB/s |
+| typed parse, `cima_parse_json` | 0.9 us | 86 us, 1815 MB/s | 0.9 us | 88 us, 1786 MB/s |
+| typed encode, `cima_to_json` | 0.6 us | 59 us, 2644 MB/s | 0.5 us | 50 us, 3119 MB/s |
+| DOM parse, `json_parse` | 0.5 us | 52 us, 3011 MB/s | 0.5 us | 55 us, 2847 MB/s |
+| DOM write, `json_text` | 0.4 us | 42 us, 3739 MB/s | 0.3 us | 34 us, 4624 MB/s |
+| builder envelope around a typed value | 0.6 us | 57 us, 2727 MB/s | 0.5 us | 48 us, 3229 MB/s |
+| validate only, `cima_json_valid` | 0.4 us | 40 us, 3927 MB/s | 0.4 us | 42 us, 3757 MB/s |
+| DOM parse, edit and diff one object | 1.9 us | 53 us, 2932 MB/s | 2.2 us | 56 us, 2796 MB/s |
+
+The bench also generates a font index shaped like the one Figma serves and vektra2 reads: 3000 files, 2.4 MB of
+pretty printed objects full of short strings and small arrays. "before" is the previous release. yyjson is the
+Homebrew build on macOS and Debian's package on Linux, found by CMake only when installed and only for this row.
+
+| font index, 2.4 MB | macOS before | macOS | Linux before | Linux |
+| --- | --- | --- | --- | --- |
+| DOM parse, `json_parse` | 1735 us, 1392 MB/s | 1037 us, 2329 MB/s | 1559 us, 1549 MB/s | 1045 us, 2312 MB/s |
+| typed parse, `cima_parse_json` | 2005 us, 1205 MB/s | 1799 us, 1342 MB/s | 1831 us, 1319 MB/s | 1705 us, 1417 MB/s |
+| validate only, `cima_json_valid` | 1040 us, 2323 MB/s | 968 us, 2494 MB/s | 1122 us, 2152 MB/s | 1020 us, 2367 MB/s |
+| `yyjson_read`, for comparison | 777 us, 3107 MB/s | | 1289 us, 1873 MB/s | |
 
 macOS 27 with Apple clang 21, Linux 6 arm64 with Debian trixie and clang 19 in Docker's virtual machine, both on
-an Apple M4 Pro. Strings are scanned eight bytes at a time, integers and timestamps are formatted without
-`snprintf`, doubles take a correctly rounded fast path, and every allocation is an arena pointer bump.
+an Apple M4 Pro.
+
+- **The DOM parser copies the text once.** Strings and keys without escapes point into the copy, ended by a nul
+  written over their closing quote, and escaped ones are decoded in place, so no string is allocated or copied on
+  its own. A loop over a stack of open containers replaces the recursion, keeps its stacks in locals, and reads
+  small integers without the general number scan. The arena holds the whole text, whitespace included, instead of
+  the string bytes alone, and a failed parse gives back everything it took.
+- **Strings are scanned eight bytes at a time** with word arithmetic, inlined where it pays: in the DOM and the
+  validator, while the typed parser is faster calling out. NEON compares were slower on an M4 for strings this
+  short, moving a vector mask to a register costs more than the scan.
+- **Whitespace is a plain loop.** The indentation of pretty printed JSON repeats, the branch predictor learns it,
+  and eight byte words were slower here. The DOM's copy ends with a nul, so its loop needs no bounds check.
+- **Short keys and strings**, up to 16 bytes, are compared and copied with two overlapping words instead of
+  calls to `memcmp` and `memcpy`.
+- Integers and timestamps are formatted without `snprintf`, doubles take a correctly rounded fast path, and every
+  allocation is an arena pointer bump.
+
+## Formatting numbers
+
+The writer's number formatting is public, for code that builds text itself:
+
+```c
+char buf[CIMA_JSON_NUMBER_MAX];
+json_format(buf, 0.1);                                              // "0.1", the shortest text reading back the same
+json_format(buf, -42);                                              // "-42", the value's type picks the format
+size_t n = cima_json_format_double(buf, 1e300);                     // "1e+300", n is 6
+```
+
+`cima_json_format_double`, `cima_json_format_int` and `cima_json_format_uint` nul terminate and return the length.
+Doubles are locale independent and give `null` when not finite, as the writer does.
 
 ## Building
 
-It depends on cilo, fetched by CMake unless `FETCHCONTENT_SOURCE_DIR_CILO` points at a checkout. C23, clang 19 or
-gcc 14 and up, macOS and Linux.
+It depends on cilo, fetched by CMake over https from `https://code.vexcited.com/ciko/cilo.git` unless a parent
+project already has it or `FETCHCONTENT_SOURCE_DIR_CILO` points at a checkout. C23, clang 19 or gcc 14 and up,
+macOS and Linux.
 
 ```sh
 cmake -S . -B build -G Ninja -DFETCHCONTENT_SOURCE_DIR_CILO=../ciko-cilo
