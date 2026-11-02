@@ -127,7 +127,8 @@ size_t cima__fmt_u64(char *out, uint64_t v) {
 // precision that reads back means every higher one does too, so a binary search finds it.
 static size_t slow_fmt_double(char *out, double v) {
   locale_t old = uselocale(the_c_locale());
-  char buf[40];
+  // %g never writes past 24 bytes for a double, gcc cannot tell.
+  char buf[320];
   int lo = 1, hi = 17;
   while (lo < hi) {
     int mid = (lo + hi) / 2;

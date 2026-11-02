@@ -966,7 +966,7 @@ cima_json *cima_json_patch(cilo_arena *a, const cima_json *before, const cima_js
   cima_json *out = CILO_NEW(a, cima_json, .type = CIMA_JSON_OBJECT);
   size_t cap = (size_t)after->len + before->len;
   out->members = cilo_arena_alloc(a, cap * sizeof(cima_json_member) + 1, alignof(cima_json_member));
-  memcpy(out->members, after->members, after->len * sizeof(cima_json_member));
+  if (after->len) memcpy(out->members, after->members, after->len * sizeof(cima_json_member));
   size_t n = after->len;
   CILO_SCRATCH(tmp, a) {
     key_index in_now;
