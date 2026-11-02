@@ -815,7 +815,8 @@ static void embedded_json(cima_ctx *c, const cima_schema *s, const char *t, size
   c->start = c->p = t;
   c->end = t + len;
   parse_value(c, s, out);
-  if (!c->stop && cima__ws(c->p, c->end) != c->end) syntax(c, c->p, "trailing characters");
+  const char *rest = cima__ws(c->p, c->end);
+  if (!c->stop && rest != c->end) syntax(c, rest, "trailing characters");
   c->start = start;
   c->p = p;
   c->end = end;
@@ -1146,7 +1147,8 @@ cima_result cima_parse_json(const cima_schema *schema, const char *json, size_t 
     report(c, CIMA_ISSUE_INVALID_JSON, "empty input");
   } else {
     parse_value(c, schema, out);
-    if (!c->stop && cima__ws(c->p, c->end) != c->end) syntax(c, c->p, "trailing characters");
+    const char *rest = cima__ws(c->p, c->end);
+    if (!c->stop && rest != c->end) syntax(c, rest, "trailing characters");
   }
   return finish(&r, schema, out);
 }

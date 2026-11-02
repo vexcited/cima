@@ -364,8 +364,9 @@ static bool fail(dom *d, const char *at, const char *msg) {
 
 static bool dom_string(dom *d, const char **out, uint32_t *len, uint8_t *flags) {
   cima__str s;
-  const char *q = cima__scan_string(d->p, d->end, &s, &d->err.msg);
-  if (!q) return fail(d, d->p, d->err.msg);
+  const char *msg;
+  const char *q = cima__scan_string(d->p, d->end, &s, &msg);
+  if (!q) return fail(d, d->p, msg);
   if (s.len > UINT32_MAX) return fail(d, d->p, "string too long");
   d->p = q;
   char *dst = cilo_arena_alloc(d->a, s.len + 1, 1);
@@ -570,13 +571,19 @@ cima_json *cima_json__raw(cima_json *node, const char *json) {
 /* reading.                                                                                                   */
 /* ========================================================================================================== */
 
+// a repeated key reads as its last value, like javascript and serde_json.
+static ptrdiff_t find_member(const cima_json *o, const char *key, size_t len) {
+  for (uint32_t i = o->len; i-- > 0;) {
+    const cima_json_member *m = &o->members[i];
+    if (cima_json_key_len(m) == len && memcmp(m->key, key, len) == 0) return i;
+  }
+  return -1;
+}
+
 cima_json *cima_json_get_n(const cima_json *o, const char *key, size_t len) {
   if (!o || o->type != CIMA_JSON_OBJECT) return nullptr;
-  for (uint32_t i = 0; i < o->len; i++) {
-    cima_json_member *m = &o->members[i];
-    if (cima_json_key_len(m) == len && memcmp(m->key, key, len) == 0) return &m->value;
-  }
-  return nullptr;
+  ptrdiff_t i = find_member(o, key, len);
+  return i < 0 ? nullptr : &o->members[i].value;
 }
 
 cima_json *cima_json_get(const cima_json *o, const char *key) { return cima_json_get_n(o, key, strlen(key)); }
@@ -743,14 +750,6 @@ static void grow(cilo_arena *a, cima_json *v, size_t size, size_t align) {
   v->flags |= CIMA_JSON__GROW;
 }
 
-static ptrdiff_t find_member(const cima_json *o, const char *key, size_t len) {
-  for (uint32_t i = 0; i < o->len; i++) {
-    const cima_json_member *m = &o->members[i];
-    if (cima_json_key_len(m) == len && memcmp(m->key, key, len) == 0) return i;
-  }
-  return -1;
-}
-
 cima_json *cima_json_set(cilo_arena *a, cima_json *o, const char *key, const cima_json *value) {
   if (!o || o->type != CIMA_JSON_OBJECT) return nullptr;
   if (o->flags & CIMA_JSON_TEMP) keep(a, o, false);
@@ -829,8 +828,14 @@ static void index_build(cilo_arena *tmp, key_index *ix, const cima_json *o) {
   ix->mask = size - 1;
   for (uint32_t i = 0; i < o->len; i++) {
     const cima_json_member *m = &o->members[i];
-    uint32_t h = (uint32_t)cima__hash(m->key, cima_json_key_len(m)) & ix->mask;
-    while (ix->slots[h]) h = (h + 1) & ix->mask;
+    size_t len = cima_json_key_len(m);
+    uint32_t h = (uint32_t)cima__hash(m->key, len) & ix->mask;
+    // a repeated key takes the slot of the earlier one, the last value wins.
+    while (ix->slots[h]) {
+      const cima_json_member *e = &o->members[ix->slots[h] - 1];
+      if (cima_json_key_len(e) == len && memcmp(e->key, m->key, len) == 0) break;
+      h = (h + 1) & ix->mask;
+    }
     ix->slots[h] = i + 1;
   }
 }
@@ -895,15 +900,22 @@ static bool eq(cilo_arena *tmp, const cima_json *a, const cima_json *b) {
       if (!eq(tmp, &a->items[i], &b->items[i])) return false;
     return true;
   case CIMA_JSON_OBJECT: {
-    if (a->len != b->len) return false;
-    key_index ix;
-    index_build(tmp, &ix, b);
+    key_index in_a, in_b;
+    index_build(tmp, &in_a, a);
+    index_build(tmp, &in_b, b);
+    // keys repeated in one object count once, with their last value.
+    size_t live_a = 0, live_b = 0;
     for (uint32_t i = 0; i < a->len; i++) {
       const cima_json_member *m = &a->members[i];
-      ptrdiff_t j = index_find(&ix, m->key, cima_json_key_len(m));
+      size_t len = cima_json_key_len(m);
+      if (index_find(&in_a, m->key, len) != i) continue;
+      live_a++;
+      ptrdiff_t j = index_find(&in_b, m->key, len);
       if (j < 0 || !eq(tmp, &m->value, &b->members[j].value)) return false;
     }
-    return true;
+    for (uint32_t i = 0; i < b->len; i++)
+      live_b += index_find(&in_b, b->members[i].key, cima_json_key_len(&b->members[i])) == i;
+    return live_a == live_b;
   }
   default: return false;
   }
