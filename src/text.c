@@ -244,8 +244,24 @@ size_t cima__fmt_timestamp(char *out, int64_t ms) {
   int m, d;
   civil_from_days(days, &y, &m, &d);
   int h = (int)(rem / 3600000), mi = (int)(rem / 60000 % 60), s = (int)(rem / 1000 % 60), f = (int)(rem % 1000);
-  int n = snprintf(out, 32, "%04lld-%02d-%02dT%02d:%02d:%02d.%03dZ", (long long)y, m, d, h, mi, s, f);
-  return (size_t)n;
+  if (y < 0 || y > 9999) {
+    int n = snprintf(out, 32, "%04lld-%02d-%02dT%02d:%02d:%02d.%03dZ", (long long)y, m, d, h, mi, s, f);
+    return (size_t)n;
+  }
+  char *p = out;
+  int fields[] = {(int)y / 100, (int)y % 100, m, d, h, mi, s};
+  static const char seps[] = "\0\0--T::";
+  for (int i = 0; i < 7; i++) {
+    if (seps[i]) *p++ = seps[i];
+    *p++ = (char)('0' + fields[i] / 10);
+    *p++ = (char)('0' + fields[i] % 10);
+  }
+  p[0] = '.';
+  p[1] = (char)('0' + f / 100);
+  p[2] = (char)('0' + f / 10 % 10);
+  p[3] = (char)('0' + f % 10);
+  p[4] = 'Z';
+  return (size_t)(p + 5 - out);
 }
 
 bool cima__check_format(cima_format format, const char *s, size_t len) {
