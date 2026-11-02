@@ -408,8 +408,46 @@ static void checks(void) {
   }
 }
 
+typedef struct Team {
+  const char *name;
+  Role_list roles;
+} Team;
+
+static int roles_of(const Team *t) {
+  int n = 0;
+  each(r, t->roles) n += *r == Role_admin ? 10 : 1;
+  return n;
+}
+
+// a list in a const struct and a const list walk like any other, with their items' constness kept.
+static void const_lists(void) {
+  Role roles[] = {Role_admin, Role_guest, Role_member};
+  const Team team = {.name = "core", .roles = {roles, 3, 3}};
+  CHECK(roles_of(&team) == 12);
+  const Role_list all = team.roles;
+  int seen = 0;
+  each(r, all) {
+    static_assert(_Generic(r, Role *: true, default: false));
+    seen++;
+  }
+  CHECK(seen == 3);
+  const struct {
+    const int *items;
+    size_t len;
+  } fixed = {(const int[]){1, 2, 3}, 3};
+  int sum = 0;
+  each(x, fixed) {
+    static_assert(_Generic(x, const int *: true, default: false));
+    sum += *x;
+  }
+  CHECK(sum == 6);
+  const Role_list none = {};
+  each(r, none) CHECK(!"an empty list has no items");
+}
+
 int main(void) {
   basics();
+  const_lists();
   numbers();
   strings();
   formats();

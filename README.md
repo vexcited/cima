@@ -55,7 +55,7 @@ if_parsed(User, kept, json, &arena) { ... }                       // parsed into
 | `serde_json::Value`, `json!()` | `json_parse()`, `json_obj(...)`, the [DOM and builder](#json-without-a-schema) |
 
 A named type alone goes in parentheses, `(Role) role`, a node does not need them. `each(item, list)` walks
-anything with `items` and `len`, and `value_or(maybe, x)` reads a `T_maybe`.
+anything with `items` and `len`, a const list or one in a const struct too, and `value_or(maybe, x)` reads a `T_maybe`.
 
 The short names come from `<cima/dsl.h>`. They are function like macros, so `string` or `array` used as plain
 identifiers are left alone, and `<cima/dsl_end.h>` drops them. `<cima/cima.h>` alone only has the `CIMA_` names.
