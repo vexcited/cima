@@ -150,6 +150,11 @@ void cima_schema_defs_dispose(cima_schema_defs *defs) {
   *defs = (cima_schema_defs){.ref_prefix = defs->ref_prefix, .alloc = defs->alloc};
 }
 
+// a scratch scope writing into `w` must not be the arena `w` grows in, its rewind would take the buffer along.
+static cilo_arena *arena_of(const cima_json_writer *w) {
+  return w->alloc && !*w->alloc ? (cilo_arena *)w->alloc : nullptr;
+}
+
 static void key_str(cima_json_writer *w, const char *key, const char *value) {
   cima_json_write_key(w, key);
   cima_json_write_string(w, value);
@@ -172,7 +177,7 @@ static void key_double(cima_json_writer *w, const char *key, double value) {
 
 // json literals written in schemas, normalized. text that does not parse is left out.
 static void key_literal(cima_json_writer *w, const char *key, const char *json, bool as_list) {
-  CILO_SCRATCH(tmp) {
+  CILO_SCRATCH(tmp, arena_of(w)) {
     cima_json *v = cima_json_parse(tmp, json, strlen(json), nullptr);
     if (v) {
       cima_json_write_key(w, key);
@@ -189,7 +194,7 @@ static void write_ref(cima_json_writer *w, const cima_schema *s, cima_schema_def
   size_t p = strlen(prefix), n = strlen(s->name);
   cima_json_begin_object(w);
   cima_json_write_key(w, "$ref");
-  CILO_SCRATCH(tmp) {
+  CILO_SCRATCH(tmp, arena_of(w)) {
     char *ref = cilo_arena_alloc(tmp, p + n, 1);
     memcpy(ref, prefix, p);
     memcpy(ref + p, s->name, n);
@@ -227,7 +232,7 @@ static void int_bounds(cima_json_writer *w, const cima_schema *s) {
 
 // a posix extended pattern matching `text` as is at the start or the end.
 static void literal_pattern(cima_json_writer *w, const char *text, bool at_end) {
-  CILO_SCRATCH(tmp) {
+  CILO_SCRATCH(tmp, arena_of(w)) {
     size_t n = strlen(text);
     char *p = cilo_arena_alloc(tmp, n * 2 + 2, 1), *d = p;
     if (!at_end) *d++ = '^';

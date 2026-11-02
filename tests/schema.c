@@ -27,6 +27,69 @@ tagged_union(Shape, "type", (Circle) circle, (Rect) rect);
 
 object(Category, string() name, array(lazy(Category)) children);
 
+object(Many,
+  (Role) r00,
+  (Role) r01,
+  (Role) r02,
+  (Role) r03,
+  (Role) r04,
+  (Role) r05,
+  (Role) r06,
+  (Role) r07,
+  (Role) r08,
+  (Role) r09,
+  (Role) r10,
+  (Role) r11,
+  (Role) r12,
+  (Role) r13,
+  (Role) r14,
+  (Role) r15,
+  (Role) r16,
+  (Role) r17,
+  (Role) r18,
+  (Role) r19,
+  (Role) r20,
+  (Role) r21,
+  (Role) r22,
+  (Role) r23,
+  (Role) r24,
+  (Role) r25,
+  (Role) r26,
+  (Role) r27,
+  (Role) r28,
+  (Role) r29,
+  (Role) r30,
+  (Role) r31,
+  (Role) r32,
+  (Role) r33,
+  (Role) r34,
+  (Role) r35,
+  (Role) r36,
+  (Role) r37,
+  (Role) r38,
+  (Role) r39,
+  (Role) r40,
+  (Role) r41,
+  (Role) r42,
+  (Role) r43,
+  (Role) r44,
+  (Role) r45,
+  (Role) r46,
+  (Role) r47,
+  (Role) r48,
+  (Role) r49,
+  (Role) r50,
+  (Role) r51,
+  (Role) r52,
+  (Role) r53,
+  (Role) r54,
+  (Role) r55,
+  (Role) r56,
+  (Role) r57,
+  (Role) r58,
+  (Role) r59,
+);
+
 static void documents(void) {
   with_arena(a) {
     CHECK_STR(CIMA_JSON_SCHEMA(u8(), .arena = a),
@@ -110,8 +173,26 @@ static void openapi(void) {
   }
 }
 
+// many refs make the writer grow while a ref is written, the scratch space they use must stay apart.
+static void growth(void) {
+  for (int round = 0; round < 3; round++) {
+    with_arena(a) {
+      char *text = CIMA_JSON_SCHEMA(Many, .arena = a);
+      cima_json *doc = json_parse(a, text, strlen(text), nullptr);
+      CHECK(doc != nullptr);
+      cima_json *props = json_at(doc, "/$defs/Many/properties");
+      CHECK(json_len(props) == 60);
+      each(m, json_members(props)) CHECK_STR(json_or(json_get(&m->value, "$ref"), ""), "#/$defs/Role");
+    }
+    char *heap = CIMA_JSON_SCHEMA(Many);
+    CHECK(cima_json_valid(heap, strlen(heap)));
+    cilo_mfree(heap);
+  }
+}
+
 int main(void) {
   documents();
+  growth();
   openapi();
   return report_failures();
 }
