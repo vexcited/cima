@@ -210,7 +210,8 @@ cima_json *cima_json__raw(cima_json *node, const char *json);
                 .flags = CIMA_JSON_TEMP,                                                                         \
                 .typed = &(const cima_json_typed){CIMA_SCHEMA(node), CIMA_CHECKED(node, ptr)}})
 
-/* keeping and changing. every function storing a node copies its builder parts into the arena first. */
+/* keeping and changing. every function storing a node copies its builder parts into the arena first. the     */
+/* node they return lives in its parent, until the parent changes again.                                     */
 
 // a deep copy into `a`, strings included. typed values are encoded into raw text on the way.
 cima_json *cima_json_clone(cilo_arena *a, const cima_json *v);
