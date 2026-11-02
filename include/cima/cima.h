@@ -642,7 +642,7 @@ static inline void cima__parse_scope_end(cima__parse_scope *s) {
 }
 
 #define CIMA__IN_SCRATCH() ((cima__parse_scope){cilo_mark_of(cilo__scratch(nullptr, 0)), true})
-#define CIMA__IN_ARENA(arena) ((cima__parse_scope){{.arena = (arena)}, false})
+#define CIMA__IN_ARENA(a) ((cima__parse_scope){{.arena = (a)}, false})
 
 // CIMA_IF_PARSED(User, user, json) { ... } else { ... }. the block sees `user`, the else branch the issues as
 // `issues`. both live in a scratch arena, so the end of the block frees them with one store, with no walk over
