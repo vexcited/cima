@@ -1,5 +1,6 @@
 #include <cima/cima.h>
 #include <stdio.h>
+#include <string.h>
 
 CIMA_OBJECT(Point,
   CIMA_NUMBER()                                x,
@@ -42,7 +43,18 @@ int main(void) {
   };
 
   alignas(cima_string) unsigned char storage[sizeof(cima_string) + 8] = {};
-  cima_result result = cima_parse_json(&dynamic, "{\"host\": \"ciko.dev\", \"port\": 443}", 34, storage, nullptr);
+  const char *json = "{\"host\": \"ciko.dev\", \"port\": 443}";
+  cima_result result = cima_parse_json(&dynamic, json, strlen(json), storage, nullptr);
+  bool ok = result.ok;
+  if (ok) {
+    cima_string host;
+    cima_u16 port;
+    memcpy(&host, storage, sizeof host);
+    memcpy(&port, storage + sizeof(cima_string), sizeof port);
+    printf("%s:%u\n", host, port);
+  }
+  // no arena: the heap holds the string, and the issues when there are some.
+  cima_dispose(&dynamic, storage);
   cima_result_dispose(&result);
-  return result.ok ? 0 : 1;
+  return ok ? 0 : 1;
 }

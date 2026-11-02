@@ -75,8 +75,10 @@ typedef enum cima_rename : uint8_t {
 typedef struct cima_schema cima_schema;
 typedef struct cima_ctx cima_ctx;
 
-// releases what a parse on a non arena allocator put inside `value`, not `value` itself. arenas need none of it.
+// releases what a parse on the heap put inside `value`, not `value` itself. arenas need none of it.
 void cima_dispose(const cima_schema *schema, void *value);
+// the same for a parse on `.alloc`.
+void cima_dispose_with(const cima_schema *schema, void *value, cilo_allocator *alloc);
 
 // custom check run after the built in ones, report problems with cima_report and return false.
 typedef bool cima_refine_fn(const void *value, cima_ctx *ctx);
@@ -333,6 +335,9 @@ CIMA__PRIMITIVES(CIMA__DECLARE_PRIMITIVE)
 #define CIMA_UUID() .format = CIMA_FORMAT_UUID
 #define CIMA_DATE() .format = CIMA_FORMAT_DATE
 #define CIMA_DATETIME() .format = CIMA_FORMAT_DATETIME
+#define CIMA_IPV4() .format = CIMA_FORMAT_IPV4
+#define CIMA_IPV6() .format = CIMA_FORMAT_IPV6
+#define CIMA_HOSTNAME() .format = CIMA_FORMAT_HOSTNAME
 #define CIMA_MATCHES(regex) .pattern = regex
 #define CIMA_STARTS_WITH(s) .starts_with = s
 #define CIMA_ENDS_WITH(s) .ends_with = s
@@ -526,6 +531,8 @@ typedef enum cima_issue_code : uint8_t {
   CIMA_ISSUE_NOT_UNIQUE,
   CIMA_ISSUE_UNKNOWN_KEY,
   CIMA_ISSUE_CUSTOM,
+  CIMA_ISSUE_DUPLICATE_KEY,
+  CIMA_ISSUE_TOO_DEEP,
 } cima_issue_code;
 
 // zod's ZodIssue. path is a json pointer such as "/tags/2".
@@ -544,6 +551,9 @@ typedef struct cima_issues {
 typedef struct cima_result {
   bool ok;
   cima_issues issues;
+  // set when the issues live on the heap or `.alloc`, for cima_result_dispose.
+  cilo_allocator *owner;
+  size_t owned;
 } cima_result;
 
 typedef struct cima_options {
@@ -565,7 +575,8 @@ typedef struct cima_pair {
   const char *value;
 } cima_pair;
 
-// parses and validates json into `out`, which must hold schema->size bytes.
+// parses and validates json into `out`, which must hold schema->size bytes. on failure `out` is zeroed and what
+// the parse allocated is released, so only the issues need disposing.
 cima_result cima_parse_json(const cima_schema *schema, const char *json, size_t len, void *out,
                             const cima_options *options);
 // parses pairs into an object, repeated keys fill arrays.
@@ -577,11 +588,31 @@ cima_result cima_parse_text(const cima_schema *schema, const char *text, void *o
 cima_result cima_check(const cima_schema *schema, const void *value, const cima_options *options);
 // encodes `value` as json, allocated from the options' allocator.
 char *cima_to_json(const cima_schema *schema, const void *value, const cima_options *options, size_t *len);
-// the json schema (draft 2020-12) of `schema`, typebox style.
+// the json schema (draft 2020-12) of `schema`, typebox style: named types go to $defs and are used through $ref.
 char *cima_json_schema(const cima_schema *schema, const cima_options *options);
 
-// adds an issue from a refinement, `path` is relative to the refined value.
+// named types met while rendering schemas into a larger document, an openapi one for instance. zeroed is ready.
+typedef struct cima_schema_defs {
+  // put before the name in every $ref, "#/$defs/" when null. openapi wants "#/components/schemas/".
+  const char *ref_prefix;
+  // where the list grows, null for the heap.
+  cilo_allocator *alloc;
+  const cima_schema **items;
+  size_t len;
+  size_t cap;
+} cima_schema_defs;
+
+typedef struct cima_json_writer cima_json_writer;
+// writes the schema of `schema` where `w` stands, named types as $ref, collected into `defs`.
+void cima_json_schema_write(cima_json_writer *w, const cima_schema *schema, cima_schema_defs *defs);
+// writes {"Name": {...}, ...} for every type collected so far, and the ones they reference in turn.
+void cima_json_schema_write_defs(cima_json_writer *w, cima_schema_defs *defs);
+void cima_schema_defs_dispose(cima_schema_defs *defs);
+
+// adds an issue from a refinement, `path` is relative to the refined value. both strings are copied.
 void cima_report(cima_ctx *ctx, const char *path, const char *message);
+// the same with a code other than CIMA_ISSUE_CUSTOM.
+void cima_report_code(cima_ctx *ctx, const char *path, cima_issue_code code, const char *message);
 
 void cima_result_dispose(cima_result *result);
 

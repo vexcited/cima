@@ -26,6 +26,11 @@
 #define CIMA_PP_FED_(m, d, a, ...) m(d, a) __VA_OPT__(CIMA_PP_FED_AGAIN CIMA_PP_PARENS(m, d, __VA_ARGS__))
 #define CIMA_PP_FED_AGAIN() CIMA_PP_FED_
 
+// m(a, b) for every pair a, b.
+#define CIMA_PP_FOR_EACH_PAIR(m, ...) __VA_OPT__(CIMA_PP_EXPAND(CIMA_PP_FEP_(m, __VA_ARGS__)))
+#define CIMA_PP_FEP_(m, a, b, ...) m(a, b) __VA_OPT__(CIMA_PP_FEP_AGAIN CIMA_PP_PARENS(m, __VA_ARGS__))
+#define CIMA_PP_FEP_AGAIN() CIMA_PP_FEP_
+
 #define CIMA_PP_PLUS_ONE(...) __VA_OPT__(+1)
 #define CIMA_PP_COUNT(...) (0 CIMA_PP_FOR_EACH(CIMA_PP_PLUS_ONE, __VA_ARGS__))
 
