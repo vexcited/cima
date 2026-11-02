@@ -300,7 +300,69 @@ static void diffing(void) {
   }
 }
 
+// the parser keeps strings in one copy of the text, which escapes, nesting and big documents must not disturb.
+static void parsing(void) {
+  with_arena(a) {
+    const char text[] = "{\"k\\\"ey\": \"a\\nb\\u00e9\\ud83d\\ude00\", \"plain\": \"xyz\", \"\": \"\\u0000z\"}";
+    cima_json *doc = parse(a, text);
+    CHECK_STR(json_or(json_get(doc, "k\"ey"), ""), "a\nb\xc3\xa9\xf0\x9f\x98\x80");
+    CHECK(json_get(doc, "k\"ey")->len == 9 && !(json_get(doc, "k\"ey")->flags & CIMA_JSON__CLEAN));
+    CHECK_STR(json_or(json_get(doc, "plain"), ""), "xyz");
+    CHECK(json_get(doc, "plain")->flags & CIMA_JSON__CLEAN);
+    CHECK(json_get(doc, "")->len == 2 && json_get(doc, "")->str[1] == 'z');
+    // the caller's text is left alone.
+    CHECK(text[3] == '\\');
+    CHECK_STR(json_text(a, doc), "{\"k\\\"ey\":\"a\\nb\xc3\xa9\xf0\x9f\x98\x80\",\"plain\":\"xyz\",\"\":\"\\u0000z\"}");
+
+    // integers on the short path and past it.
+    cima_json *nums = parse(a, "[7, 123456789012345678, 1234567890123456789, 12345678901234567890, 1.5, 2e3, -0, 0]");
+    CHECK(json_index(nums, 0)->type == CIMA_JSON_INT && json_index(nums, 0)->i == 7);
+    CHECK(json_index(nums, 1)->i == 123456789012345678);
+    CHECK(json_index(nums, 2)->i == 1234567890123456789);
+    CHECK(json_index(nums, 3)->type == CIMA_JSON_UINT && json_index(nums, 3)->u == 12345678901234567890u);
+    CHECK(json_index(nums, 4)->type == CIMA_JSON_DOUBLE && json_index(nums, 4)->d == 1.5);
+    CHECK(json_index(nums, 5)->type == CIMA_JSON_DOUBLE && json_index(nums, 5)->d == 2000);
+    CHECK(json_index(nums, 6)->type == CIMA_JSON_INT && json_index(nums, 6)->i == 0);
+    cima_json_error err;
+    CHECK(!json_parse(a, "[12x]", 5, &err) && err.offset == 3);
+    CHECK(!json_parse(a, "[1", 2, &err) && err.offset == 2);
+
+    // deep nesting, stacks that grow many times, and containers closing in every order.
+    cima_json_writer w = json_writer(a, .indent = 1);
+    json_begin_array(&w);
+    for (int i = 0; i < 20000; i++) {
+      json_begin_object(&w);
+      json_field(&w, "i", i);
+      json_key(&w, "list");
+      json_begin_array(&w);
+      for (int j = 0; j < i % 5; j++) json_put(&w, json_arr(j, "s"));
+      json_end_array(&w);
+      json_end_object(&w);
+    }
+    json_end_array(&w);
+    size_t len;
+    char *big = cima_json_writer_finish(&w, &len);
+    cima_json *all = json_parse(a, big, len, nullptr);
+    CHECK(json_len(all) == 20000);
+    CHECK(json_or(json_at(all, "/19999/i"), 0) == 19999 && json_len(json_at(all, "/19999/list")) == 4);
+    CHECK_STR(json_or(json_at(all, "/7/list/1/1"), ""), "s");
+    char deep[1100];
+    for (int i = 0; i < 512; i++) deep[i] = '[', deep[1023 - i] = ']';
+    CHECK(json_parse(a, deep, 1024, nullptr) != nullptr);
+    deep[1024] = ']';
+    memmove(deep + 1, deep, 1024);
+    deep[0] = '[';
+    CHECK(!json_parse(a, deep, 1025, &err) && strcmp(err.message, "nested too deep") == 0 && err.offset == 512);
+
+    // a failed parse gives back what it took from the arena.
+    cilo_mark before = cilo_mark_of(a);
+    CHECK(!json_parse(a, big, len - 1, &err) && err.offset == len - 1);
+    CHECK(a->cur == before.cur && a->chunk == before.chunk);
+  }
+}
+
 int main(void) {
+  parsing();
   reading();
   changing();
   building();

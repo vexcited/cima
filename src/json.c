@@ -411,183 +411,222 @@ bool cima_json_valid(const char *text, size_t len) {
 }
 
 /* ========================================================================================================== */
-/* dom parser. children gather on a stack in a scratch arena, each container then takes an exact copy.        */
+/* dom parser. the text is copied into the arena once: strings and keys point into the copy, ended by a nul   */
+/* written over their closing quote, and escaped ones are decoded in place. a loop over a stack of open        */
+/* containers gathers their children in a scratch arena, and each container takes an exact copy when it ends. */
 /* ========================================================================================================== */
-
-typedef struct dom {
-  const char *p, *end;
-  cilo_arena *a;
-  cilo_arena *tmp;
-  cima_json *items;
-  size_t items_len, items_cap;
-  cima_json_member *members;
-  size_t members_len, members_cap;
-  uint32_t depth;
-  cima__lex_error err;
-} dom;
 
 constexpr uint32_t DOM_MAX_DEPTH = 512;
 
-static bool fail(dom *d, const char *at, const char *msg) {
-  if (!d->err.msg) d->err = (cima__lex_error){msg, at};
-  return false;
+typedef struct dom {
+  cilo_arena *a;
+  cilo_arena *tmp;
+  const char *msg;
+} dom;
+
+// an open container: where its children start on their stack.
+typedef struct dom_frame {
+  size_t base;
+  bool object;
+} dom_frame;
+
+typedef struct dom_stack {
+  void *items;
+  size_t cap;
+} dom_stack;
+
+[[gnu::noinline]] static dom_stack dom_grow(cilo_arena *tmp, dom_stack s, size_t size, size_t first) {
+  size_t cap = s.cap ? s.cap * 2 : first;
+  return (dom_stack){cilo_arena_realloc(tmp, s.items, s.cap * size, cap * size, 16), cap};
 }
 
-static bool dom_string(dom *d, const char **out, uint32_t *len, uint8_t *flags) {
+// the string whose opening quote is at p, in the copy. returns what follows it, or null with `msg` set.
+[[gnu::always_inline]] static inline char *dom_string(dom *d, char *p, const char *end, const char **str,
+                                                      uint32_t *len, uint8_t *flags) {
   cima__str s;
-  const char *msg;
-  const char *q = cima__scan_string(d->p, d->end, &s, &msg);
-  if (!q) return fail(d, d->p, msg);
-  if (s.len > UINT32_MAX) return fail(d, d->p, "string too long");
-  d->p = q;
-  char *dst = cilo_arena_alloc(d->a, s.len + 1, 1);
+  const char *q = cima__scan_string_inline(p, end, &s, &d->msg);
+  if (!q) return nullptr;
+  if (s.len > UINT32_MAX) {
+    d->msg = "string too long";
+    return nullptr;
+  }
+  char *body = p + 1;
   size_t n = s.len;
   if (s.escaped) {
-    n = cima__unescape(dst, s.ptr, s.len);
-    if (n < s.len) dst = cilo_arena_realloc(d->a, dst, s.len + 1, n + 1, 1);
+    n = cima__unescape(body, body, n);
     *flags = 0;
   } else {
-    memcpy(dst, s.ptr, n);
     // no escapes in the source means no quote, backslash or control character, and the utf-8 is valid.
     *flags = CIMA_JSON__CLEAN;
   }
-  dst[n] = '\0';
-  *out = dst;
+  body[n] = '\0';
+  *str = body;
   *len = (uint32_t)n;
-  return true;
+  return (char *)q;
 }
 
-static bool dom_value(dom *d, cima_json *out);
-
-static bool dom_array(dom *d, cima_json *out) {
-  if (++d->depth > DOM_MAX_DEPTH) return fail(d, d->p, "nested too deep");
-  d->p = cima__ws(d->p + 1, d->end);
-  *out = (cima_json){.type = CIMA_JSON_ARRAY};
-  if (d->p < d->end && *d->p == ']') {
-    d->p++;
-    d->depth--;
-    return true;
-  }
-  size_t base = d->items_len;
-  for (;;) {
-    cima_json v;
-    if (!dom_value(d, &v)) return false;
-    if (UNLIKELY(d->items_len == d->items_cap)) {
-      size_t cap = d->items_cap ? d->items_cap * 2 : 64;
-      d->items = cilo_arena_realloc(d->tmp, d->items, d->items_cap * sizeof *d->items, cap * sizeof *d->items,
-                                    alignof(cima_json));
-      d->items_cap = cap;
-    }
-    d->items[d->items_len++] = v;
-    d->p = cima__ws(d->p, d->end);
-    if (d->p < d->end && *d->p == ',') {
-      d->p++;
-      continue;
-    }
-    if (d->p < d->end && *d->p == ']') break;
-    return fail(d, d->p, "expected ',' or ']'");
-  }
-  d->p++;
-  size_t n = d->items_len - base;
-  if (n > UINT32_MAX) return fail(d, d->p, "array too long");
-  out->items = cilo_arena_alloc(d->a, n * sizeof(cima_json), alignof(cima_json));
-  memcpy(out->items, d->items + base, n * sizeof(cima_json));
-  out->len = (uint32_t)n;
-  d->items_len = base;
-  d->depth--;
-  return true;
+// the copy ends with a nul, which is not whitespace, so skipping whitespace in it needs no bounds check.
+static inline char *dom_ws(char *p) {
+  while ((unsigned char)*p <= ' ' && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+  return p;
 }
 
-static bool dom_object(dom *d, cima_json *out) {
-  if (++d->depth > DOM_MAX_DEPTH) return fail(d, d->p, "nested too deep");
-  d->p = cima__ws(d->p + 1, d->end);
-  *out = (cima_json){.type = CIMA_JSON_OBJECT};
-  if (d->p < d->end && *d->p == '}') {
-    d->p++;
-    d->depth--;
-    return true;
-  }
-  size_t base = d->members_len;
-  for (;;) {
-    if (d->p >= d->end || *d->p != '"') return fail(d, d->p, "expected a key");
-    cima_json_member m = {};
-    if (!dom_string(d, &m.key, &m.key_len, &m.flags)) return false;
-    d->p = cima__ws(d->p, d->end);
-    if (d->p >= d->end || *d->p != ':') return fail(d, d->p, "expected ':'");
-    d->p++;
-    if (!dom_value(d, &m.value)) return false;
-    if (UNLIKELY(d->members_len == d->members_cap)) {
-      size_t cap = d->members_cap ? d->members_cap * 2 : 32;
-      d->members = cilo_arena_realloc(d->tmp, d->members, d->members_cap * sizeof *d->members,
-                                      cap * sizeof *d->members, alignof(cima_json_member));
-      d->members_cap = cap;
+// parses one value from p into `root`. returns where it stopped, the error position when `d->msg` is set. the
+// stacks live in locals, so stores of children never make the compiler reload them.
+static char *dom_parse(dom *d, char *p, const char *end, cima_json *root) {
+  dom_frame frames[DOM_MAX_DEPTH];
+  uint32_t depth = 0;
+  bool object = false;
+  dom_stack item_stack = {}, member_stack = {};
+  cima_json *items = nullptr;
+  cima_json_member *members = nullptr;
+  size_t items_len = 0, members_len = 0;
+  cima_json v;
+  char *q;
+value:
+  p = dom_ws(p);
+  if (p >= end) return d->msg = "unexpected end of input", p;
+  switch (*p) {
+  case '{':
+    if (depth == DOM_MAX_DEPTH) return d->msg = "nested too deep", p;
+    p = dom_ws(p + 1);
+    if (p < end && *p == '}') {
+      p++;
+      v = (cima_json){.type = CIMA_JSON_OBJECT};
+      goto done;
     }
-    d->members[d->members_len++] = m;
-    d->p = cima__ws(d->p, d->end);
-    if (d->p < d->end && *d->p == ',') {
-      d->p = cima__ws(d->p + 1, d->end);
-      continue;
+    frames[depth++] = (dom_frame){members_len, true};
+    object = true;
+    goto key;
+  case '[':
+    if (depth == DOM_MAX_DEPTH) return d->msg = "nested too deep", p;
+    p = dom_ws(p + 1);
+    if (p < end && *p == ']') {
+      p++;
+      v = (cima_json){.type = CIMA_JSON_ARRAY};
+      goto done;
     }
-    if (d->p < d->end && *d->p == '}') break;
-    return fail(d, d->p, "expected ',' or '}'");
-  }
-  d->p++;
-  size_t n = d->members_len - base;
-  if (n > UINT32_MAX) return fail(d, d->p, "object too long");
-  out->members = cilo_arena_alloc(d->a, n * sizeof(cima_json_member), alignof(cima_json_member));
-  memcpy(out->members, d->members + base, n * sizeof(cima_json_member));
-  out->len = (uint32_t)n;
-  d->members_len = base;
-  d->depth--;
-  return true;
-}
-
-static bool dom_value(dom *d, cima_json *out) {
-  d->p = cima__ws(d->p, d->end);
-  if (d->p >= d->end) return fail(d, d->p, "unexpected end of input");
-  const char *q;
-  switch (*d->p) {
-  case '{': return dom_object(d, out);
-  case '[': return dom_array(d, out);
-  case '"': *out = (cima_json){.type = CIMA_JSON_STRING}; return dom_string(d, &out->str, &out->len, &out->flags);
+    frames[depth++] = (dom_frame){items_len, false};
+    object = false;
+    goto value;
+  case '"':
+    v = (cima_json){.type = CIMA_JSON_STRING};
+    if (!(q = dom_string(d, p, end, &v.str, &v.len, &v.flags))) return p;
+    p = q;
+    goto done;
   case 't':
-    if (!(q = literal(d->p, d->end, "true", 4))) return fail(d, d->p, "invalid literal");
-    *out = (cima_json){.type = CIMA_JSON_BOOL, .b = true};
-    d->p = q;
-    return true;
+    if (!literal(p, end, "true", 4)) return d->msg = "invalid literal", p;
+    v = (cima_json){.type = CIMA_JSON_BOOL, .b = true};
+    p += 4;
+    goto done;
   case 'f':
-    if (!(q = literal(d->p, d->end, "false", 5))) return fail(d, d->p, "invalid literal");
-    *out = (cima_json){.type = CIMA_JSON_BOOL, .b = false};
-    d->p = q;
-    return true;
+    if (!literal(p, end, "false", 5)) return d->msg = "invalid literal", p;
+    v = (cima_json){.type = CIMA_JSON_BOOL, .b = false};
+    p += 5;
+    goto done;
   case 'n':
-    if (!(q = literal(d->p, d->end, "null", 4))) return fail(d, d->p, "invalid literal");
-    *out = (cima_json){};
-    d->p = q;
-    return true;
-  default: break;
+    if (!literal(p, end, "null", 4)) return d->msg = "invalid literal", p;
+    v = (cima_json){};
+    p += 4;
+    goto done;
+  default: {
+    // small integers, most numbers in practice, without the general scan: up to 18 digits never overflow.
+    if (*p >= '1' && *p <= '9') {
+      uint64_t u = (uint64_t)(*p - '0');
+      q = p + 1;
+      const char *stop = end - q > 17 ? q + 17 : end;
+      while (q < stop && *q >= '0' && *q <= '9') u = u * 10 + (uint64_t)(*q++ - '0');
+      if (q == end || (*q != '.' && *q != 'e' && *q != 'E' && (*q < '0' || *q > '9'))) {
+        v = (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)u};
+        p = q;
+        goto done;
+      }
+    }
+    cima__num n;
+    if (!(q = (char *)cima__scan_number(p, end, &n))) {
+      bool numeric = *p == '-' || (*p >= '0' && *p <= '9');
+      return d->msg = numeric ? "invalid number" : "unexpected character", p;
+    }
+    uint64_t mag;
+    if (n.plain && cima__num_magnitude(&n, &mag) == CIMA__INT_OK) {
+      if (!n.neg) {
+        v = mag <= INT64_MAX ? (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)mag}
+                             : (cima_json){.type = CIMA_JSON_UINT, .u = mag};
+        p = q;
+        goto done;
+      }
+      if (mag <= (uint64_t)INT64_MAX + 1) {
+        v = (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)(0 - mag)};
+        p = q;
+        goto done;
+      }
+    }
+    double x = cima__num_double(&n, p, (size_t)(q - p));
+    if (!isfinite(x)) return d->msg = "number out of range", p;
+    v = (cima_json){.type = CIMA_JSON_DOUBLE, .d = x};
+    p = q;
+    goto done;
   }
-  cima__num n;
-  q = cima__scan_number(d->p, d->end, &n);
-  if (!q) {
-    bool numeric = *d->p == '-' || (*d->p >= '0' && *d->p <= '9');
-    return fail(d, d->p, numeric ? "invalid number" : "unexpected character");
   }
-  uint64_t mag;
-  if (n.plain && cima__num_magnitude(&n, &mag) == CIMA__INT_OK) {
-    if (!n.neg) *out = mag <= INT64_MAX ? (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)mag}
-                                        : (cima_json){.type = CIMA_JSON_UINT, .u = mag};
-    else if (mag <= (uint64_t)INT64_MAX + 1) *out = (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)(0 - mag)};
-    else goto as_double;
-    d->p = q;
-    return true;
+done:
+  if (!depth) {
+    *root = v;
+    return p;
   }
-as_double:;
-  double v = cima__num_double(&n, d->p, (size_t)(q - d->p));
-  if (!isfinite(v)) return fail(d, d->p, "number out of range");
-  *out = (cima_json){.type = CIMA_JSON_DOUBLE, .d = v};
-  d->p = q;
-  return true;
+  if (object) {
+    members[members_len - 1].value = v;
+  } else {
+    if (UNLIKELY(items_len == item_stack.cap)) {
+      item_stack = dom_grow(d->tmp, item_stack, sizeof *items, 256);
+      items = item_stack.items;
+    }
+    items[items_len++] = v;
+  }
+  p = dom_ws(p);
+  if (p < end && *p == ',') {
+    p++;
+    if (!object) goto value;
+    p = dom_ws(p);
+    goto key;
+  }
+  if (p >= end || *p != (object ? '}' : ']'))
+    return d->msg = object ? "expected ',' or '}'" : "expected ',' or ']'", p;
+  p++;
+  size_t base = frames[--depth].base;
+  if (object) {
+    size_t n = members_len - base;
+    if (n > UINT32_MAX) return d->msg = "object too long", p;
+    cima_json_member *m = cilo_arena_alloc(d->a, n * sizeof *m, alignof(cima_json_member));
+    memcpy(m, members + base, n * sizeof *m);
+    members_len = base;
+    v = (cima_json){.type = CIMA_JSON_OBJECT, .len = (uint32_t)n, .members = m};
+  } else {
+    size_t n = items_len - base;
+    if (n > UINT32_MAX) return d->msg = "array too long", p;
+    cima_json *copy = cilo_arena_alloc(d->a, n * sizeof *copy, alignof(cima_json));
+    memcpy(copy, items + base, n * sizeof *copy);
+    items_len = base;
+    v = (cima_json){.type = CIMA_JSON_ARRAY, .len = (uint32_t)n, .items = copy};
+  }
+  object = depth && frames[depth - 1].object;
+  goto done;
+key:
+  if (p >= end || *p != '"') return d->msg = "expected a key", p;
+  if (UNLIKELY(members_len == member_stack.cap)) {
+    member_stack = dom_grow(d->tmp, member_stack, sizeof *members, 128);
+    members = member_stack.items;
+  }
+  {
+    cima_json_member *m = &members[members_len];
+    *m = (cima_json_member){};
+    if (!(q = dom_string(d, p, end, &m->key, &m->key_len, &m->flags))) return p;
+    members_len++;
+    p = q;
+  }
+  p = dom_ws(p);
+  if (p >= end || *p != ':') return d->msg = "expected ':'", p;
+  p++;
+  goto value;
 }
 
 static cima_json *node_in(cilo_arena *a, cima_json v) {
@@ -597,20 +636,29 @@ static cima_json *node_in(cilo_arena *a, cima_json v) {
 }
 
 cima_json *cima_json_parse(cilo_arena *a, const char *text, size_t len, cima_json_error *err) {
-  if (!text) text = "";
-  dom d = {.p = text, .end = text + len, .a = a};
-  cima_json *root = nullptr;
+  cilo_mark start = cilo_mark_of(a);
+  char *copy = cilo_arena_alloc(a, len + 1, 1);
+  if (len) memcpy(copy, text, len);
+  copy[len] = '\0';
+  const char *end = copy + len;
+  dom d = {.a = a};
+  cima_json v;
+  char *p = copy;
   CILO_SCRATCH(tmp, a) {
     d.tmp = tmp;
-    cima_json v;
-    if (dom_value(&d, &v)) {
-      d.p = cima__ws(d.p, d.end);
-      if (d.p == d.end) root = node_in(a, v);
-      else fail(&d, d.p, "trailing characters");
+    p = dom_parse(&d, copy, end, &v);
+    if (!d.msg) {
+      p = (char *)cima__ws(p, end);
+      if (p != end) d.msg = "trailing characters";
     }
   }
-  if (!root && err) *err = (cima_json_error){(size_t)(d.err.at - text), d.err.msg};
-  return root;
+  if (d.msg) {
+    if (err) *err = (cima_json_error){(size_t)(p - copy), d.msg};
+    // nothing points into what the parse allocated, it all goes back.
+    cilo_rewind(start);
+    return nullptr;
+  }
+  return node_in(a, v);
 }
 
 /* ========================================================================================================== */
