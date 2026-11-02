@@ -14,9 +14,9 @@ object(Order,
   nullable(string(matches("^[A-Z]{2}$")))   country,
 );
 
-static const char order_json[] = "{\"id\": 9, \"customer\": \"  ACME \", \"items\": [{\"name\": \"bolt\", \"sizes\": "
-                                 "[1, 2, 3], \"blob\": \"AAAA\"}, {\"name\": \"nut\\u00e9\", \"sizes\": []}], \"meta\": "
-                                 "{\"k\": [true]}, \"country\": \"FR\"}";
+static const char order_json[] = "{\"id\": 9, \"customer\": \"  ACME \", \"items\": [{\"name\": \"bolt\", "
+                                 "\"sizes\": [1, 2, 3], \"blob\": \"AAAA\"}, {\"name\": \"nut\\u00e9\", "
+                                 "\"sizes\": []}], \"meta\": {\"k\": [true]}, \"country\": \"FR\"}";
 
 // an allocator that knows every live block and checks the size each free gives back.
 typedef struct counting {
@@ -71,19 +71,17 @@ static void custom_allocator(void) {
   CHECK(order.items.items == nullptr && order.customer == nullptr);
 
   // a failed parse releases the value and leaves one block, the issues.
-  r = cima_parse_json(&Order_schema, "{\"id\": 1, \"customer\": \"x\", \"items\": [{\"name\": \"a\", \"sizes\": [1, 2]}, "
-                                     "{\"name\": 1}], \"meta\": null, \"country\": \"fr\"}",
-                      strlen("{\"id\": 1, \"customer\": \"x\", \"items\": [{\"name\": \"a\", \"sizes\": [1, 2]}, "
-                             "{\"name\": 1}], \"meta\": null, \"country\": \"fr\"}"),
-                      &order, &o);
+  const char *bad = "{\"id\": 1, \"customer\": \"x\", \"items\": [{\"name\": \"a\", \"sizes\": [1, 2]}, "
+                    "{\"name\": 1}], \"meta\": null, \"country\": \"fr\"}";
+  r = cima_parse_json(&Order_schema, bad, strlen(bad), &order, &o);
   CHECK(!r.ok && r.issues.len == 3 && c.live == 1 && r.owner == &c.allocator);
   CHECK(order.customer == nullptr && order.items.len == 0);
   cima_result_dispose(&r);
   CHECK(c.live == 0 && c.bad_frees == 0);
 
   // so does a syntax error in the middle of a list.
-  r = cima_parse_json(&Order_schema, "{\"id\": 1, \"customer\": \"x\", \"items\": [{\"name\": \"a\", \"sizes\": [1, ",
-                      strlen("{\"id\": 1, \"customer\": \"x\", \"items\": [{\"name\": \"a\", \"sizes\": [1, "), &order, &o);
+  const char *cut = "{\"id\": 1, \"customer\": \"x\", \"items\": [{\"name\": \"a\", \"sizes\": [1, ";
+  r = cima_parse_json(&Order_schema, cut, strlen(cut), &order, &o);
   CHECK(!r.ok && c.live == 1);
   cima_result_dispose(&r);
   CHECK(c.live == 0 && c.bad_frees == 0);

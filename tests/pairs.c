@@ -57,7 +57,8 @@ static void query(void) {
       CHECK_STR(r.issues.items[i].message, want[i][1]);
     }
     Strict st;
-    r = cima_parse_pairs(&Strict_schema, PAIRS({"a", "1"}, {"b", "2"}), &st, &(cima_options){.arena = a, .coerce = true});
+    r = cima_parse_pairs(&Strict_schema, PAIRS({"a", "1"}, {"b", "2"}), &st,
+                         &(cima_options){.arena = a, .coerce = true});
     CHECK_STR(first_issue(a, r), "/b: unknown key");
   }
 }

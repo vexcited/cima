@@ -47,7 +47,9 @@ static void push_frame(cima_ctx *c, frame f) {
   c->frames[c->nframes++] = f;
 }
 
-static inline void push_key(cima_ctx *c, const char *key, size_t len) { push_frame(c, (frame){.key = key, .len = len}); }
+static inline void push_key(cima_ctx *c, const char *key, size_t len) {
+  push_frame(c, (frame){.key = key, .len = len});
+}
 static inline void push_index(cima_ctx *c, size_t i) { push_frame(c, (frame){.index = i, .is_index = true}); }
 static inline void pop(cima_ctx *c) { c->nframes--; }
 
@@ -244,7 +246,9 @@ static void check_list(cima_ctx *c, const cima_schema *s, const cima__list *list
 /* building values.                                                                                           */
 /* ========================================================================================================== */
 
-static bool is_space(char ch) { return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\v' || ch == '\f'; }
+static bool is_space(char ch) {
+  return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\v' || ch == '\f';
+}
 
 // `buf` holds `len` decoded bytes in a block of `cap` from the output allocator. trims, lowercases, terminates,
 // gives back what is left and checks.
@@ -553,7 +557,8 @@ static void parse_object(cima_ctx *c, const cima_schema *s, void *out, const cha
         syntax(c, c->p, "unexpected end of input");
         break;
       }
-      ptrdiff_t i = skip && klen == skip_len && memcmp(key, skip, klen) == 0 ? -2 : cima__find_field(info, key, klen, hint);
+      bool is_tag = skip && klen == skip_len && memcmp(key, skip, klen) == 0;
+      ptrdiff_t i = is_tag ? -2 : cima__find_field(info, key, klen, hint);
       if (i >= 0 && !(seen[i / 64] & (1ull << (i % 64)))) {
         seen[i / 64] |= 1ull << (i % 64);
         hint = (size_t)i + 1;
@@ -563,7 +568,8 @@ static void parse_object(cima_ctx *c, const cima_schema *s, void *out, const cha
       } else {
         if (i >= 0 || (i == -1 && strict)) {
           push_key(c, key, klen);
-          report(c, i >= 0 ? CIMA_ISSUE_DUPLICATE_KEY : CIMA_ISSUE_UNKNOWN_KEY, i >= 0 ? "duplicate key" : "unknown key");
+          if (i >= 0) report(c, CIMA_ISSUE_DUPLICATE_KEY, "duplicate key");
+          else report(c, CIMA_ISSUE_UNKNOWN_KEY, "unknown key");
           pop(c);
         }
         skip_value(c);
@@ -810,7 +816,9 @@ static void parse_value(cima_ctx *c, const cima_schema *s, void *out) {
 /* text: path segments, headers, query strings and forms.                                                     */
 /* ========================================================================================================== */
 
-static bool word_is(const char *t, size_t len, const char *word) { return strlen(word) == len && memcmp(t, word, len) == 0; }
+static bool word_is(const char *t, size_t len, const char *word) {
+  return strlen(word) == len && memcmp(t, word, len) == 0;
+}
 
 static bool stringish(const cima_schema *s) {
   s = cima__deref(s);
@@ -1306,7 +1314,8 @@ bool cima__value_eq(const cima_schema *s, const void *a, const void *b) {
   case CIMA_KIND_OPTIONAL:
   case CIMA_KIND_NULLABLE: {
     bool x = *(const bool *)a, y = *(const bool *)b;
-    return x == y && (!x || cima__value_eq(s->inner, (const char *)a + s->value_offset, (const char *)b + s->value_offset));
+    size_t off = s->value_offset;
+    return x == y && (!x || cima__value_eq(s->inner, (const char *)a + off, (const char *)b + off));
   }
   case CIMA_KIND_OBJECT:
     for (size_t i = 0; i < s->fields_count; i++) {

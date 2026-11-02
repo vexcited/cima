@@ -498,7 +498,10 @@ static bool dom_value(dom *d, cima_json *out) {
   }
   cima__num n;
   q = cima__scan_number(d->p, d->end, &n);
-  if (!q) return fail(d, d->p, *d->p == '-' || (*d->p >= '0' && *d->p <= '9') ? "invalid number" : "unexpected character");
+  if (!q) {
+    bool numeric = *d->p == '-' || (*d->p >= '0' && *d->p <= '9');
+    return fail(d, d->p, numeric ? "invalid number" : "unexpected character");
+  }
   uint64_t mag;
   if (n.plain && cima__num_magnitude(&n, &mag) == CIMA__INT_OK) {
     if (!n.neg) *out = mag <= INT64_MAX ? (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)mag}
@@ -877,7 +880,8 @@ static bool num_eq(const cima_json *a, const cima_json *b) {
   }
   if (a->type == CIMA_JSON_DOUBLE || b->type == CIMA_JSON_DOUBLE) {
     const cima_json *d = a->type == CIMA_JSON_DOUBLE ? a : b, *i = a->type == CIMA_JSON_DOUBLE ? b : a;
-    if (i->type == CIMA_JSON_INT) return d->d >= -0x1p63 && d->d < 0x1p63 && (int64_t)d->d == i->i && d->d == (double)(int64_t)d->d;
+    if (i->type == CIMA_JSON_INT)
+      return d->d >= -0x1p63 && d->d < 0x1p63 && (int64_t)d->d == i->i && d->d == (double)(int64_t)d->d;
     return d->d >= 0 && d->d < 0x1p64 && (uint64_t)d->d == i->u && d->d == (double)(uint64_t)d->d;
   }
   // an int and a uint never hold the same value.

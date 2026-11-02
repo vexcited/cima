@@ -393,9 +393,9 @@ bool cima__check_format(cima_format format, const char *s, size_t len);
 bool cima__parse_timestamp(const char *s, size_t len, int64_t *ms);
 // `2026-10-29T13:47:10.000Z`, at most 32 bytes.
 size_t cima__fmt_timestamp(char *out, int64_t ms);
-// standard or url safe alphabet, padding optional. `out` holds len / 4 * 3 + 3 bytes.
+// standard or url safe alphabet, padding optional. `out` holds `len / 4 * 3 + 3` bytes.
 bool cima__base64_decode(const char *s, size_t len, uint8_t *out, size_t *out_len);
-// standard alphabet with padding, `out` holds (len + 2) / 3 * 4 bytes.
+// standard alphabet with padding, `out` holds `(len + 2) / 3 * 4` bytes.
 size_t cima__base64_encode(const uint8_t *p, size_t len, char *out);
 
 /* ========================================================================================================== */

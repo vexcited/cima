@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 /* ========================================================================================================== */
-/* a dom for json that has no schema, serde_json::Value and json!() for c.                                    */
+/* a dom for json that has no schema, `serde_json::Value` and `json!` for c.                                  */
 /*                                                                                                            */
 /*   cima_json *doc = cima_json_parse(&arena, text, len, &err);      every node lives in the arena            */
 /*   int64_t n = CIMA_JSON_OR(cima_json_at(doc, "/meta/count"), 0);   typed reads with a fallback              */
@@ -63,7 +63,7 @@ struct cima_json {
 
 struct cima_json_member {
   const char *key;
-  // zero means strlen(key).
+  // zero means `strlen(key)`.
   uint32_t key_len;
   uint8_t flags;
   cima_json value;
@@ -132,7 +132,7 @@ uint64_t cima_json_as_uint(const cima_json *v, uint64_t fallback);
 double cima_json_as_double(const cima_json *v, double fallback);
 const char *cima_json_as_string(const cima_json *v, const char *fallback);
 
-// the fallback's type picks the reader: CIMA_JSON_OR(v, 25), CIMA_JSON_OR(v, "guest"), CIMA_JSON_OR(v, false).
+// the fallback's type picks the reader: `CIMA_JSON_OR(v, 25)`, `CIMA_JSON_OR(v, "guest")`, `CIMA_JSON_OR(v, false)`.
 #define CIMA_JSON_OR(v, fallback)                                                                                \
   _Generic((fallback),                                                                                           \
       bool: cima_json_as_bool,                                                                                   \
@@ -151,14 +151,15 @@ const char *cima_json_as_string(const cima_json *v, const char *fallback);
 /*                                                                                                            */
 /* values are picked by _Generic: bool, any integer, float and double, strings, nullptr, cima_json * nodes      */
 /* nested builders included, CIMA_JSON_RAW text and CIMA_JSON_TYPED values. a null string is written as null.   */
-/* a comparison is an int in c, write (bool)(a < b) for a boolean.                                            */
+/* a comparison is an int in c, write `(bool)(a < b)` for a boolean.                                          */
 /* ========================================================================================================== */
 
 static inline cima_json cima_json__null(nullptr_t) { return (cima_json){}; }
 static inline cima_json cima_json__bool(bool b) { return (cima_json){.type = CIMA_JSON_BOOL, .b = b}; }
 static inline cima_json cima_json__int(int64_t i) { return (cima_json){.type = CIMA_JSON_INT, .i = i}; }
 static inline cima_json cima_json__uint(uint64_t u) {
-  return u > INT64_MAX ? (cima_json){.type = CIMA_JSON_UINT, .u = u} : (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)u};
+  if (u > INT64_MAX) return (cima_json){.type = CIMA_JSON_UINT, .u = u};
+  return (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)u};
 }
 static inline cima_json cima_json__double(double d) { return (cima_json){.type = CIMA_JSON_DOUBLE, .d = d}; }
 cima_json cima_json__string(const char *s);
@@ -194,7 +195,7 @@ cima_json *cima_json__obj(cima_json *node, cima_json_member *members);
 cima_json *cima_json__arr(cima_json *node, cima_json *items);
 cima_json *cima_json__raw(cima_json *node, const char *json);
 
-// CIMA_JSON_OBJ("key", value, ...) and CIMA_JSON_ARR(value, ...). a trailing comma is fine.
+// `CIMA_JSON_OBJ("key", value, ...)` and `CIMA_JSON_ARR(value, ...)`. a trailing comma is fine.
 #define CIMA_JSON_OBJ(...)                                                                                       \
   cima_json__obj(&(cima_json){}, (cima_json_member[]){CIMA_PP_FOR_EACH_PAIR(CIMA__JSON_KV, __VA_ARGS__){}})
 #define CIMA__JSON_KV(k, v) {.key = (k), .value = CIMA_JSON_V(v)},
@@ -203,7 +204,7 @@ cima_json *cima_json__raw(cima_json *node, const char *json);
 #define CIMA__JSON_ITEM(...) __VA_OPT__(CIMA_JSON_V(__VA_ARGS__), )
 // json text spliced as is, it must be valid.
 #define CIMA_JSON_RAW(json) cima_json__raw(&(cima_json){}, json)
-// a typed value written through its schema: CIMA_JSON_TYPED(User, &user).
+// a typed value written through its schema: `CIMA_JSON_TYPED(User, &user)`.
 #define CIMA_JSON_TYPED(node, ptr)                                                                               \
   (&(cima_json){.type = CIMA_JSON_TYPED,                                                                         \
                 .flags = CIMA_JSON_TEMP,                                                                         \

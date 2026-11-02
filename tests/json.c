@@ -245,7 +245,9 @@ static cima_json *diff_query(cilo_arena *a, const cima_json *old, const cima_jso
     if (json_len(update)) json_set(a, kinds, "update", update);
   }
   cima_json *removed = json_clone(a, json_obj());
-  each(c, changes) if (c->kind == CIMA_JSON_REMOVED) json_set(a, removed, c->key, removal(a, c->key, c->before, now_ids));
+  each(c, changes) {
+    if (c->kind == CIMA_JSON_REMOVED) json_set(a, removed, c->key, removal(a, c->key, c->before, now_ids));
+  }
   if (json_len(removed)) json_set(a, kinds, "delete", removed);
   return json_len(kinds) ? kinds : nullptr;
 }
@@ -253,12 +255,13 @@ static cima_json *diff_query(cilo_arena *a, const cima_json *old, const cima_jso
 static void diffing(void) {
   with_arena(a) {
     // changed_new_and_removed.
-    cima_json *old = parse(a, "{\"1\": {\"id\": \"1\", \"name\": \"a\", \"x\": 1}, \"2\": {\"id\": \"2\", \"name\": \"b\"}}");
+    cima_json *old = parse(a, "{\"1\": {\"id\": \"1\", \"name\": \"a\", \"x\": 1}, "
+                              "\"2\": {\"id\": \"2\", \"name\": \"b\"}}");
     cima_json *now = parse(a, "{\"1\": {\"id\": \"1\", \"name\": \"c\"}, \"3\": {\"id\": \"3\", \"name\": \"d\"}}");
     cima_json *d = diff_query(a, old, now, now);
-    CHECK(json_eq(d, parse(a, "{\"update\": {\"1\": {\"id\": \"1\", \"name\": \"c\", \"x\": null}, \"3\": {\"id\": \"3\", "
-                              "\"name\": \"d\", \"" TOMBSTONE "\": false}}, \"delete\": {\"2\": {\"id\": \"2\", \"" TOMBSTONE
-                              "\": true}}}")));
+    CHECK(json_eq(d, parse(a, "{\"update\": {\"1\": {\"id\": \"1\", \"name\": \"c\", \"x\": null}, "
+                              "\"3\": {\"id\": \"3\", \"name\": \"d\", \"" TOMBSTONE "\": false}}, "
+                              "\"delete\": {\"2\": {\"id\": \"2\", \"" TOMBSTONE "\": true}}}")));
     CHECK(diff_query(a, old, old, old) == nullptr);
 
     // moved_between_queries_is_not_tombstoned.

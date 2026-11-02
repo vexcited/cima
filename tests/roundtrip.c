@@ -44,7 +44,8 @@ static void typed(void) {
     CHECK(strlen(text) == len);
     CHECK_STR(text, "{\"id\":18446744073709551615,\"delta\":-9223372036854775808,\"title\":\"tab\\there \\\"quoted\\\" "
                     "\xc3\xa9\xf0\x9f\x98\x80 \\u0001\\u001f\x7f\",\"rank\":null,\"pinned\":true,\"ratio\":0.1,"
-                    "\"thumb\":\"AAEC/w==\",\"createdAt\":\"2026-10-29T13:47:10.250Z\",\"meta\":{\"a\": [1, 2.5, null]},"
+                    "\"thumb\":\"AAEC/w==\",\"createdAt\":\"2026-10-29T13:47:10.250Z\","
+                    "\"meta\":{\"a\": [1, 2.5, null]},"
                     "\"status\":\"published\",\"figures\":[{\"kind\":\"point\",\"x\":-1.5,\"y\":1e-7},{\"kind\":"
                     "\"square\",\"side\":3}],\"grid\":[[1,-2],[],[32767]]}");
     Doc again;
@@ -56,7 +57,8 @@ static void typed(void) {
     CHECK(dom && json_or(json_get(dom, "id"), 0ull) == UINT64_MAX);
     CHECK(json_or(json_at(dom, "/figures/1/side"), 0) == 3);
     CHECK_STR(json_text(a, dom), "{\"id\":18446744073709551615,\"delta\":-9223372036854775808,\"title\":\"tab\\there "
-                                 "\\\"quoted\\\" \xc3\xa9\xf0\x9f\x98\x80 \\u0001\\u001f\x7f\",\"rank\":null,\"pinned\":"
+                                 "\\\"quoted\\\" \xc3\xa9\xf0\x9f\x98\x80 \\u0001\\u001f\x7f\",\"rank\":null,"
+                                 "\"pinned\":"
                                  "true,\"ratio\":0.1,\"thumb\":\"AAEC/w==\",\"createdAt\":\"2026-10-29T13:47:10.250Z\","
                                  "\"meta\":{\"a\":[1,2.5,null]},\"status\":\"published\",\"figures\":[{\"kind\":"
                                  "\"point\",\"x\":-1.5,\"y\":1e-7},{\"kind\":\"square\",\"side\":3}],\"grid\":[[1,-2],"

@@ -159,8 +159,8 @@ static void numbers(void) {
     CHECK_STR(PARSE(number(gt(0)), "0", &d), ": must be greater than 0");
     CHECK_STR(PARSE(number(), "true", &d), ": expected a number, got a boolean");
     // coercion reads numbers and booleans out of strings.
-    cima_result r = CIMA_PARSE(Wide, "{\"a\": \"-1\", \"b\": \"2\", \"c\": \"3\", \"d\": \"4\", \"e\": \"5\", \"f\": \"6\", "
-                                     "\"g\": \"7\", \"h\": \"8\"}",
+    cima_result r = CIMA_PARSE(Wide, "{\"a\": \"-1\", \"b\": \"2\", \"c\": \"3\", \"d\": \"4\", \"e\": \"5\", "
+                                     "\"f\": \"6\", \"g\": \"7\", \"h\": \"8\"}",
                                &w, .arena = a, .coerce = true);
     CHECK(r.ok && w.a == -1 && w.h == 8);
     bool b;
@@ -268,7 +268,8 @@ static void formats(void) {
     with_arena(a) {
       cima_string out;
       bool ok = cima_parse_text(&s, t->text, &out, &(cima_options){.arena = a}).ok;
-      if (ok != t->valid) fprintf(stderr, "format %d: %s should be %s\n", t->format, t->text, t->valid ? "valid" : "invalid");
+      if (ok != t->valid)
+        fprintf(stderr, "format %d: %s should be %s\n", t->format, t->text, t->valid ? "valid" : "invalid");
       CHECK(ok == t->valid);
     }
   }
@@ -294,7 +295,8 @@ static void composites(void) {
     CHECK_STR(PARSE(Shape, "{\"type\": \"star\"}", &shape), "/type: must be one of circle, rect");
     CHECK_STR(PARSE(Shape, "{\"radius\": 1}", &shape), "/type: required");
     CHECK_STR(PARSE(Shape, "{\"type\": 1}", &shape), "/type: expected a string");
-    CHECK_STR(PARSE(Shape, "{\"type\": \"rect\", \"width\": 1, \"height\": 1, \"depth\": 1}", &shape), "/depth: unknown key");
+    CHECK_STR(PARSE(Shape, "{\"type\": \"rect\", \"width\": 1, \"height\": 1, \"depth\": 1}", &shape),
+              "/depth: unknown key");
     CHECK_STR(PARSE(Shape, "{\"type\": \"circle\", \"radius\": -1}", &shape), "/radius: must be greater than 0");
 
     Category tree;
@@ -355,12 +357,12 @@ static void composites(void) {
 static void refinements(void) {
   with_arena(a) {
     SignUp s;
-    CHECK_STR(PARSE(SignUp, "{\"email\": \"a@b.co\", \"password\": \"12345678\", \"confirm\": \"12345678\", \"lucky\": 4}", &s),
-              "ok");
-    CHECK_STR(PARSE(SignUp, "{\"email\": \"a@b.co\", \"password\": \"12345678\", \"confirm\": \"x\", \"lucky\": 4}", &s),
-              "/confirm: passwords do not match");
-    CHECK_STR(PARSE(SignUp, "{\"email\": \"a@b.co\", \"password\": \"12345678\", \"confirm\": \"12345678\", \"lucky\": 3}", &s),
-              "/lucky: must be even");
+    const char *good = "{\"email\": \"a@b.co\", \"password\": \"12345678\", \"confirm\": \"12345678\", \"lucky\": 4}";
+    CHECK_STR(PARSE(SignUp, good, &s), "ok");
+    const char *mismatch = "{\"email\": \"a@b.co\", \"password\": \"12345678\", \"confirm\": \"x\", \"lucky\": 4}";
+    CHECK_STR(PARSE(SignUp, mismatch, &s), "/confirm: passwords do not match");
+    const char *odd = "{\"email\": \"a@b.co\", \"password\": \"12345678\", \"confirm\": \"12345678\", \"lucky\": 3}";
+    CHECK_STR(PARSE(SignUp, odd, &s), "/lucky: must be even");
     // object validators only run on values that passed their own checks.
     cima_result r = CIMA_PARSE(SignUp, "{\"email\": \"a\", \"password\": \"1\", \"confirm\": \"2\", \"lucky\": 3}", &s,
                                .arena = a);

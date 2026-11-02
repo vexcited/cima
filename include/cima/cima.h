@@ -588,7 +588,7 @@ cima_result cima_parse_text(const cima_schema *schema, const char *text, void *o
 cima_result cima_check(const cima_schema *schema, const void *value, const cima_options *options);
 // encodes `value` as json, allocated from the options' allocator.
 char *cima_to_json(const cima_schema *schema, const void *value, const cima_options *options, size_t *len);
-// the json schema (draft 2020-12) of `schema`, typebox style: named types go to $defs and are used through $ref.
+// the json schema of `schema`, draft 2020-12 and typebox style: named types go to $defs and are used through $ref.
 char *cima_json_schema(const cima_schema *schema, const cima_options *options);
 
 // named types met while rendering schemas into a larger document, an openapi one for instance. zeroed is ready.
