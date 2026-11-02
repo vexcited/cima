@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#ifdef CIMA_BENCH_YYJSON
+#include <yyjson.h>
+#endif
 
 // the file object of vektra's shape.rs, as GET /api/files and the listings answer it.
 object(FileJson,
@@ -170,8 +173,152 @@ static void run(int files, int iterations) {
   }
 }
 
+/* ========================================================================================================== */
+/* a font index as figma serves it: megabytes of pretty printed objects full of short strings.                */
+/* ========================================================================================================== */
+
+object(FontAxis, string() tag, string() name, number() min, number() max, boolean() hidden);
+object(FontInstance, string() name, unknown() axes);
+object(FontFile,
+  string()             family,
+  string()             style,
+  string()             filename,
+  u32()                version,
+  u16()                weight,
+  boolean()            italic,
+  u8()                 stretch,
+  string()             postscript,
+  string()             category,
+  array(string())      subsets,
+  array(FontAxis)      variation_axes,
+  array(FontInstance)  variation_instances,
+  options(rename_all(CAMEL)),
+);
+object(FontIndex, array(FontFile) files);
+
+static const char *const families[] = {
+  "Inter", "Roboto", "Noto Sans", "Noto Serif", "Source Sans 3", "IBM Plex Mono", "Playfair Display", "Montserrat",
+  "Open Sans", "Lato", "Merriweather", "Fira Code", "Space Grotesk", "DM Sans", "Work Sans", "Libre Baskerville",
+};
+static const char *const styles[] = {"Thin", "ExtraLight", "Light", "Regular", "Medium", "SemiBold", "Bold",
+                                     "ExtraBold", "Black"};
+static const char *const scripts[] = {"latin", "latin-ext", "cyrillic", "greek", "vietnamese", "tamil", "arabic"};
+
+// pretty printed like the file vektra2 downloads, 2.4 MB for 3000 files.
+static char *font_index(cilo_arena *a, int files, size_t *len) {
+  cima_json_writer w = json_writer(a, .indent = 2);
+  json_begin_object(&w);
+  json_key(&w, "files");
+  json_begin_array(&w);
+  uint32_t seed = 1;
+  for (int i = 0; i < files; i++) {
+    seed = seed * 1664525 + 1013904223;
+    const char *family = families[i % 16];
+    int weight = i % 9, script = (int)(seed >> 8) % 7;
+    bool italic = (seed >> 4) & 1, variable = (seed >> 12) % 3 == 0;
+    char name[96], post[96];
+    snprintf(name, sizeof name, "%s %d", family, i / 16);
+    snprintf(post, sizeof post, "%s%d-%s%s", family, i / 16, styles[weight], italic ? "Italic" : "");
+    for (char *p = post; *p; p++)
+      if (*p == ' ') *p = '-';
+    json_begin_object(&w);
+    json_field(&w, "family", name);
+    json_field(&w, "style", aprintf(a, "%s%s", styles[weight], italic ? " Italic" : ""));
+    json_field(&w, "filename", aprintf(a, "%s_%s__%d", post, variable ? "wght" : "static", i % 4 + 1));
+    json_field(&w, "version", i % 4 + 1);
+    json_field(&w, "weight", 100 + weight * 100);
+    json_field(&w, "italic", italic);
+    json_field(&w, "stretch", 5);
+    json_field(&w, "postscript", post);
+    json_field(&w, "category", (seed >> 20) & 1 ? "sans-serif" : "serif");
+    json_key(&w, "subsets");
+    json_begin_array(&w);
+    json_put(&w, "latin");
+    json_put(&w, "latin-ext");
+    if (script > 1) json_put(&w, scripts[script]);
+    json_end_array(&w);
+    json_key(&w, "variationAxes");
+    json_begin_array(&w);
+    if (variable) {
+      json_begin_object(&w);
+      json_field(&w, "tag", "wght");
+      json_field(&w, "name", "Weight");
+      json_field(&w, "min", 100);
+      json_field(&w, "max", 900);
+      json_field(&w, "default", 400);
+      json_field(&w, "hidden", false);
+      json_end_object(&w);
+    }
+    json_end_array(&w);
+    json_key(&w, "variationInstances");
+    json_begin_array(&w);
+    for (int k = 0; variable && k < 9; k++) {
+      json_begin_object(&w);
+      json_field(&w, "name", styles[k]);
+      json_key(&w, "axes");
+      json_begin_object(&w);
+      json_field(&w, "wght", 100 + k * 100);
+      json_end_object(&w);
+      json_end_object(&w);
+    }
+    json_end_array(&w);
+    json_end_object(&w);
+  }
+  json_end_array(&w);
+  json_key(&w, "renames");
+  json_begin_object(&w);
+  json_key(&w, "family");
+  json_begin_object(&w);
+  for (int i = 0; i < files / 16; i++)
+    json_field(&w, aprintf(a, "%s %d Legacy", families[i % 16], i), aprintf(a, "%s %d", families[i % 16], i));
+  json_end_object(&w);
+  json_key(&w, "style");
+  json_begin_object(&w);
+  for (int i = 0; i < 9; i++) json_field(&w, aprintf(a, "%s Oblique", styles[i]), aprintf(a, "%s Italic", styles[i]));
+  json_end_object(&w);
+  json_end_object(&w);
+  json_end_object(&w);
+  return cima_json_writer_finish(&w, len);
+}
+
+static void run_font_index(int files, int iterations) {
+  with_arena(data) {
+    size_t len;
+    char *text = font_index(data, files, &len);
+    printf("\nfont index, %d files, %zu bytes, pretty printed. microseconds per run, and MB/s of json.\n\n", files,
+           len);
+    printf("| %-38s | %10s | %8s |\n", "operation", "us", "MB/s");
+    printf("| %-38s | %10s | %8s |\n", "--------------------------------------", "----------", "--------");
+    cilo_arena work = {};
+    double ns;
+    MEASURE(ns, iterations, rewinding(&work) {
+      cima_json *doc = json_parse(&work, text, len, nullptr);
+      sink += json_len(json_get(doc, "files"));
+    });
+    row("dom parse, cima_json_parse", ns, len);
+    MEASURE(ns, iterations, rewinding(&work) {
+      FontIndex index;
+      cima_result r = cima_parse_json(&FontIndex_schema, text, len, &index, &(cima_options){.arena = &work});
+      sink += r.ok + index.files.len;
+    });
+    row("typed parse, cima_parse_json", ns, len);
+    MEASURE(ns, iterations, sink += cima_json_valid(text, len));
+    row("validate only, cima_json_valid", ns, len);
+#ifdef CIMA_BENCH_YYJSON
+    MEASURE(ns, iterations, {
+      yyjson_doc *doc = yyjson_read(text, len, 0);
+      sink += yyjson_arr_size(yyjson_obj_get(yyjson_doc_get_root(doc), "files"));
+      yyjson_doc_free(doc);
+    });
+    row("yyjson_read, for comparison", ns, len);
+#endif
+    cilo_arena_drop(&work);
+  }
+}
+
 int main(void) {
   run(1, 20000);
   run(100, 300);
+  run_font_index(3000, 50);
   return sink == 0;
 }
