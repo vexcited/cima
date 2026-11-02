@@ -1,5 +1,7 @@
 #include "test.h"
 
+#include <stdlib.h>
+
 object(User, u32() id, string() handle, optional(string()) email, options(rename_all(CAMEL)));
 
 static cima_json *parse(cilo_arena *a, const char *text) { return json_parse(a, text, strlen(text), nullptr); }
@@ -361,8 +363,45 @@ static void parsing(void) {
   }
 }
 
+static void formatting(void) {
+  char out[CIMA_JSON_NUMBER_MAX];
+  CHECK(json_format(out, 0.1) == 3 && strcmp(out, "0.1") == 0);
+  json_format(out, -0.0);
+  CHECK_STR(out, "-0");
+  json_format(out, 1e300);
+  CHECK_STR(out, "1e+300");
+  json_format(out, 5e-324);
+  CHECK_STR(out, "5e-324");
+  json_format(out, 1.7976931348623157e308);
+  CHECK_STR(out, "1.7976931348623157e+308");
+  json_format(out, 2.0f);
+  CHECK_STR(out, "2");
+  json_format(out, 0.0 / 0.0);
+  CHECK_STR(out, "null");
+  CHECK(json_format(out, INT64_MIN) == 20 && strcmp(out, "-9223372036854775808") == 0);
+  json_format(out, UINT64_MAX);
+  CHECK_STR(out, "18446744073709551615");
+  json_format(out, -42);
+  CHECK_STR(out, "-42");
+  json_format(out, (unsigned char)200);
+  CHECK_STR(out, "200");
+  // every double reads back the same, and fits.
+  uint64_t seed = 42;
+  bool exact = true;
+  for (int i = 0; i < 100000; i++) {
+    seed = seed * 6364136223846793005u + 1442695040888963407u;
+    double d;
+    memcpy(&d, &seed, 8);
+    if (d != d) continue;
+    size_t n = cima_json_format_double(out, d);
+    exact &= n < CIMA_JSON_NUMBER_MAX && strtod(out, nullptr) == d;
+  }
+  CHECK(exact);
+}
+
 int main(void) {
   parsing();
+  formatting();
   reading();
   changing();
   building();

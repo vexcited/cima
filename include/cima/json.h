@@ -304,6 +304,25 @@ char *cima_json_writer_finish(cima_json_writer *w, size_t *len);
 // drops the buffer of a writer on the heap or an allocator.
 void cima_json_writer_dispose(cima_json_writer *w);
 
+// numbers as the writer puts them, into `out` of CIMA_JSON_NUMBER_MAX bytes, nul terminated. they return the
+// length. doubles get the shortest text that reads back the same, locale independent, `null` when not finite.
+#define CIMA_JSON_NUMBER_MAX 32
+size_t cima_json_format_double(char *out, double value);
+size_t cima_json_format_int(char *out, int64_t value);
+size_t cima_json_format_uint(char *out, uint64_t value);
+
+// the value's type picks the format: `char buf[CIMA_JSON_NUMBER_MAX]; CIMA_JSON_FORMAT(buf, 0.1);`.
+#define CIMA_JSON_FORMAT(out, x)                                                                                 \
+  _Generic((x),                                                                                                  \
+      float: cima_json_format_double,                                                                            \
+      double: cima_json_format_double,                                                                           \
+      unsigned char: cima_json_format_uint,                                                                      \
+      unsigned short: cima_json_format_uint,                                                                     \
+      unsigned int: cima_json_format_uint,                                                                       \
+      unsigned long: cima_json_format_uint,                                                                      \
+      unsigned long long: cima_json_format_uint,                                                                 \
+      default: cima_json_format_int)(out, x)
+
 // any builder value, picked like in CIMA_JSON_OBJ.
 #define CIMA_JSON_PUT(w, x) cima_json_write(w, CIMA_JSON_OF(x))
 #define CIMA_JSON_FIELD(w, key, x) (cima_json_write_key(w, key), CIMA_JSON_PUT(w, x))

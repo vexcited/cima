@@ -99,5 +99,6 @@
 #define json_begin_array(...)   cima_json_begin_array(__VA_ARGS__)
 #define json_end_array(...)     cima_json_end_array(__VA_ARGS__)
 #define json_finish(w)          cima_json_writer_finish(w, nullptr)
+#define json_format(...)        CIMA_JSON_FORMAT(__VA_ARGS__)
 
 #endif

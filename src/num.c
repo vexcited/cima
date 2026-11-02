@@ -187,3 +187,23 @@ size_t cima__fmt_double(char *out, double v) {
   }
   return n + slow_fmt_double(out + n, v);
 }
+
+size_t cima_json_format_double(char *out, double v) {
+  size_t n = isfinite(v) ? cima__fmt_double(out, v) : (memcpy(out, "null", 4), 4);
+  out[n] = '\0';
+  return n;
+}
+
+size_t cima_json_format_uint(char *out, uint64_t v) {
+  size_t n = cima__fmt_u64(out, v);
+  out[n] = '\0';
+  return n;
+}
+
+size_t cima_json_format_int(char *out, int64_t v) {
+  size_t n = 0;
+  if (v < 0) out[n++] = '-';
+  n += cima__fmt_u64(out + n, v < 0 ? 0 - (uint64_t)v : (uint64_t)v);
+  out[n] = '\0';
+  return n;
+}

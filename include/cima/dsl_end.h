@@ -93,5 +93,6 @@
 #undef json_begin_array
 #undef json_end_array
 #undef json_finish
+#undef json_format
 
 #endif
