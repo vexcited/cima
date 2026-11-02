@@ -123,6 +123,8 @@ static inline void refine(cima_ctx *c, const cima_schema *s, const void *value, 
 /* checks on values in c, shared by every parser and by cima_check.                                           */
 /* ========================================================================================================== */
 
+static const char *plural(size_t n) { return n == 1 ? "" : "s"; }
+
 static size_t code_points(const char *s, size_t len) {
   size_t n = 0;
   for (size_t i = 0; i < len; i++) n += ((unsigned char)s[i] & 0xc0) != 0x80;
@@ -138,8 +140,10 @@ static void check_string(cima_ctx *c, const cima_schema *s, const char *str, siz
   const cima_string_opts *o = &s->string;
   if (o->has_min || o->has_max) {
     size_t n = code_points(str, len);
-    if (o->has_min && n < o->min) reportf(c, CIMA_ISSUE_TOO_SMALL, "must be at least %zu characters long", o->min);
-    if (o->has_max && n > o->max) reportf(c, CIMA_ISSUE_TOO_BIG, "must be at most %zu characters long", o->max);
+    if (o->has_min && n < o->min)
+      reportf(c, CIMA_ISSUE_TOO_SMALL, "must be at least %zu character%s long", o->min, plural(o->min));
+    if (o->has_max && n > o->max)
+      reportf(c, CIMA_ISSUE_TOO_BIG, "must be at most %zu character%s long", o->max, plural(o->max));
   }
   if (o->format && !cima__check_format(o->format, str, len))
     reportf(c, CIMA_ISSUE_INVALID_FORMAT, "must be a valid %s", format_name(o->format));
@@ -159,8 +163,10 @@ static void check_string(cima_ctx *c, const cima_schema *s, const char *str, siz
 
 static void check_bytes(cima_ctx *c, const cima_schema *s, size_t len) {
   const cima_string_opts *o = &s->string;
-  if (o->has_min && len < o->min) reportf(c, CIMA_ISSUE_TOO_SMALL, "must be at least %zu bytes long", o->min);
-  if (o->has_max && len > o->max) reportf(c, CIMA_ISSUE_TOO_BIG, "must be at most %zu bytes long", o->max);
+  if (o->has_min && len < o->min)
+    reportf(c, CIMA_ISSUE_TOO_SMALL, "must be at least %zu byte%s long", o->min, plural(o->min));
+  if (o->has_max && len > o->max)
+    reportf(c, CIMA_ISSUE_TOO_BIG, "must be at most %zu byte%s long", o->max, plural(o->max));
 }
 
 // `big` is a u64 past INT64_MAX, held in `u`.
@@ -193,8 +199,10 @@ static void check_number(cima_ctx *c, const cima_schema *s, double d) {
 
 static void check_list(cima_ctx *c, const cima_schema *s, const cima__list *list) {
   const cima_array_opts *o = &s->array;
-  if (o->has_min && list->len < o->min) reportf(c, CIMA_ISSUE_TOO_SMALL, "must hold at least %zu items", o->min);
-  if (o->has_max && list->len > o->max) reportf(c, CIMA_ISSUE_TOO_BIG, "must hold at most %zu items", o->max);
+  if (o->has_min && list->len < o->min)
+    reportf(c, CIMA_ISSUE_TOO_SMALL, "must hold at least %zu item%s", o->min, plural(o->min));
+  if (o->has_max && list->len > o->max)
+    reportf(c, CIMA_ISSUE_TOO_BIG, "must hold at most %zu item%s", o->max, plural(o->max));
   if (!o->unique || list->len < 2) return;
   const cima_schema *item = s->inner;
   size_t size = item->size, n = list->len;
