@@ -663,8 +663,13 @@ static inline void cima__parse_scope_end(cima__parse_scope *s) {
           if (CIMA__UNIQUE(cima__r).ok)
 
 // walks anything with `items` and `len`: every T_list, cima_issues, ciesta_headers. `var` points at the item.
+// `list` is evaluated once, and an empty list may have null items.
 #define CIMA_EACH(var, list)                                                                                     \
-  for (typeof((list).items) var = (list).items; var < (list).items + (list).len; var++)
+  for (typeof(list) CIMA__UNIQUE(cima__l) = (list), *CIMA__UNIQUE(cima__lp) = &CIMA__UNIQUE(cima__l);            \
+       CIMA__UNIQUE(cima__lp); CIMA__UNIQUE(cima__lp) = nullptr)                                                 \
+    for (typeof(CIMA__UNIQUE(cima__l).items) var = CIMA__UNIQUE(cima__l).items,                                  \
+                                             CIMA__UNIQUE(cima__e) = var ? var + CIMA__UNIQUE(cima__l).len : var; \
+         var != CIMA__UNIQUE(cima__e); var++)
 
 // the value of a T_maybe, or `fallback`.
 #define CIMA_VALUE_OR(maybe, fallback) ((maybe).some ? (maybe).value : (fallback))
