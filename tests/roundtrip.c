@@ -1,5 +1,6 @@
 #include "test.h"
 
+#include <locale.h>
 #include <math.h>
 #include <stdlib.h>
 
@@ -196,7 +197,28 @@ static void strings(void) {
   }
 }
 
+// a locale writing 0,5 changes nothing, on the fast paths or the slow ones.
+static void locales(void) {
+  const char *names[] = {"de_DE.UTF-8", "fr_FR.UTF-8", "de_DE", "fr_FR"};
+  bool set = false;
+  for (size_t i = 0; i < 4 && !set; i++) set = setlocale(LC_ALL, names[i]) != nullptr;
+  if (!set) return;
+  with_arena(a) {
+    double values[] = {0.5, 1e-7, 1.7976931348623157e308, 123456.789, 5e-324};
+    for (size_t i = 0; i < 5; i++) {
+      char *text = CIMA_TO_JSON(number(), &values[i], .arena = a);
+      CHECK(strchr(text, ',') == nullptr);
+      double back;
+      CHECK(CIMA_PARSE(number(), text, &back, .arena = a).ok && back == values[i]);
+    }
+    double d;
+    CHECK(CIMA_PARSE(number(), "0.12345678901234567890123", &d, .arena = a).ok && d == 0.12345678901234568);
+  }
+  setlocale(LC_ALL, "C");
+}
+
 int main(void) {
+  locales();
   typed();
   doubles();
   integers();
