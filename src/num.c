@@ -123,14 +123,19 @@ size_t cima__fmt_u64(char *out, uint64_t v) {
   return n;
 }
 
-// snprintf in the c locale, at the precision that first reads back the same double.
+// snprintf in the c locale, at the lowest precision that reads back the same double. 17 always does, and a
+// precision that reads back means every higher one does too, so a binary search finds it.
 static size_t slow_fmt_double(char *out, double v) {
   locale_t old = uselocale(the_c_locale());
   char buf[40];
-  for (int precision = 15; precision <= 17; precision++) {
-    snprintf(buf, sizeof buf, "%.*g", precision, v);
-    if (precision == 17 || strtod_l(buf, nullptr, the_c_locale()) == v) break;
+  int lo = 1, hi = 17;
+  while (lo < hi) {
+    int mid = (lo + hi) / 2;
+    snprintf(buf, sizeof buf, "%.*g", mid, v);
+    if (strtod_l(buf, nullptr, the_c_locale()) == v) hi = mid;
+    else lo = mid + 1;
   }
+  snprintf(buf, sizeof buf, "%.*g", lo, v);
   uselocale(old);
   // `1e-07` reads better as `1e-7`, which is also what javascript prints.
   size_t n = 0;
