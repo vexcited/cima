@@ -94,7 +94,7 @@ static void basics(void) {
       {"/website", "must be a valid url"},
       {"/role", "must be one of admin, member, guest"},
       {"/tags/2", "repeats item 0"},
-      {"/address/street", "must be at least 1 characters long"},
+      {"/address/street", "must be at least 1 character long"},
       {"/address/zip", "must match ^[0-9]{5}$"},
       {"/id", "required"},
     };
@@ -183,7 +183,7 @@ static void strings(void) {
     // trim and lowercase happen before the checks.
     CHECK_STR(PARSE(string(trim(), lowercase(), email()), "\" ADA@Example.COM \"", &s), "ok");
     CHECK_STR(s, "ada@example.com");
-    CHECK_STR(PARSE(string(trim(), at_least(1)), "\"   \"", &s), ": must be at least 1 characters long");
+    CHECK_STR(PARSE(string(trim(), at_least(1)), "\"   \"", &s), ": must be at least 1 character long");
     CHECK_STR(PARSE(string(starts_with("sk_"), ends_with("!")), "\"sk_x!\"", &s), "ok");
     CHECK_STR(PARSE(string(starts_with("sk_")), "\"pk_x\"", &s), ": must start with \"sk_\"");
     CHECK_STR(PARSE(string(ends_with("!")), "\"x\"", &s), ": must end with \"!\"");
@@ -336,7 +336,7 @@ static void composites(void) {
     CHECK_STR(PARSE(Blob, "{\"data\": \"\", \"at\": \"yesterday\", \"extra\": 1, \"steps\": [5]}", &blob),
               "/at: must be an iso 8601 date and time");
     CHECK_STR(PARSE(Blob, "{\"data\": \"\", \"at\": \"2000-01-01\", \"extra\": 1, \"steps\": []}", &blob),
-              "/steps: must hold at least 1 items");
+              "/steps: must hold at least 1 item");
     CHECK_STR(PARSE(Blob, "{\"data\": \"\", \"at\": \"2000-01-01\", \"extra\": 1, \"steps\": [7]}", &blob),
               "/steps/0: must be a multiple of 5");
     int64_t at;
