@@ -6,7 +6,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ${PROJECT_IS_TOP_LEVEL})
 
-option(CIMA_BUILD_TESTS "build the cima tests and examples" ${PROJECT_IS_TOP_LEVEL})
+option(CIMA_BUILD_TESTS "build the cima tests, examples and benchmark" ${PROJECT_IS_TOP_LEVEL})
 
 # a parent project may already provide cilo, otherwise it is fetched.
 include(FetchContent)
@@ -42,4 +42,7 @@ if(CIMA_BUILD_TESTS)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME ${target} COMMAND ${target})
   endforeach()
+  add_executable(cima_bench bench/bench.c)
+  target_link_libraries(cima_bench PRIVATE cima)
+  target_compile_options(cima_bench PRIVATE -O2 -Wall -Wextra -Wpedantic)
 endif()
