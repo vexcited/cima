@@ -176,6 +176,12 @@ void cima_json_end_array(cima_json_writer *w) {
   w->comma = true;
 }
 
+const char *cima_json_writer_text(cima_json_writer *w) {
+  cima__reserve(w, 1);
+  w->buf[w->len] = '\0';
+  return w->buf;
+}
+
 char *cima_json_writer_finish(cima_json_writer *w, size_t *len) {
   cima__reserve(w, 1);
   w->buf[w->len] = '\0';

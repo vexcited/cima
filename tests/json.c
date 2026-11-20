@@ -177,6 +177,13 @@ static void building(void) {
 
 static void writing(void) {
   with_arena(a) {
+    cima_json_writer early = json_writer(a);
+    CHECK_STR(cima_json_writer_text(&early), "");
+    json_begin_array(&early);
+    json_put(&early, 1);
+    CHECK_STR(cima_json_writer_text(&early), "[1");
+    json_end_array(&early);
+    CHECK_STR(cima_json_writer_text(&early), "[1]");
     User user = {.id = 1, .handle = "x\ty"};
     cima_json_writer w = json_writer(a);
     json_begin_object(&w);

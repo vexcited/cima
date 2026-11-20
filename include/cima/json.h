@@ -330,6 +330,8 @@ void cima_json_end_array(cima_json_writer *w);
 void cima_json_write(cima_json_writer *w, const cima_json *v);
 // encodes a typed value in place, so a struct can sit inside an ad hoc envelope.
 void cima_json_write_typed(cima_json_writer *w, const cima_schema *schema, const void *value);
+// the text so far, nul terminated and still the writer's, valid until it writes again. "" for an empty writer.
+const char *cima_json_writer_text(cima_json_writer *w);
 // nul terminates and hands the buffer over, `len` may be null. the writer is empty again.
 char *cima_json_writer_finish(cima_json_writer *w, size_t *len);
 // drops the buffer of a writer on the heap or an allocator.
