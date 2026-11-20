@@ -197,57 +197,55 @@ cima_json_schema_write_defs(&w, &defs);                             // {"NewPost
 
 ## Speed
 
-`cima_bench`, a release build, the best of nine rounds. The payload is the file object of vektra's `shape.rs`,
-40 fields, inside the `{error, status, meta, i18n}` envelope: one file of 1.6 KB, the size of most responses,
-and a listing of 100 files, 156 KB. Microseconds per run, and MB/s of JSON.
+Microseconds per run and MB/s of JSON, the best of nine rounds of a release build, on an Apple M4 Pro with macOS 27 and Apple clang 21. `cima_bench` with no arguments measures the payloads below, and with JSON files as arguments it measures those, next to yyjson when CMake finds it installed. The three usual files come from the simdjson and nativejson-benchmark repositories: `twitter.json` is pretty printed with Japanese text and escaped URLs, `citm_catalog.json` is mostly indentation, small integers and short keys, and `canada.json` is coordinates. bun is 1.4.5 and its `JSON.parse` and `JSON.stringify`, nlohmann is the C++ `json` 3.12 from Homebrew, both measured the same way outside the bench.
 
-| operation | macOS, 1 file | macOS, 100 files | Linux, 1 file | Linux, 100 files |
+| parse | cima `json_parse` | yyjson 0.13 | bun `JSON.parse` | nlohmann |
 | --- | --- | --- | --- | --- |
-| typed parse, `cima_parse_json` | 0.9 us | 86 us, 1815 MB/s | 0.9 us | 88 us, 1786 MB/s |
-| typed encode, `cima_to_json` | 0.6 us | 59 us, 2644 MB/s | 0.5 us | 50 us, 3119 MB/s |
-| DOM parse, `json_parse` | 0.5 us | 52 us, 3011 MB/s | 0.5 us | 55 us, 2847 MB/s |
-| DOM write, `json_text` | 0.4 us | 42 us, 3739 MB/s | 0.3 us | 34 us, 4624 MB/s |
-| builder envelope around a typed value | 0.6 us | 57 us, 2727 MB/s | 0.5 us | 48 us, 3229 MB/s |
-| validate only, `cima_json_valid` | 0.4 us | 40 us, 3927 MB/s | 0.4 us | 42 us, 3757 MB/s |
-| DOM parse, edit and diff one object | 1.9 us | 53 us, 2932 MB/s | 2.2 us | 56 us, 2796 MB/s |
+| twitter.json, 632 KB | **127 us**, 4994 MB/s | 133 us, 4756 MB/s | 326 us, 1940 MB/s | 2897 us, 218 MB/s |
+| citm_catalog.json, 1.7 MB | **317 us**, 5447 MB/s | 350 us, 4943 MB/s | 771 us, 2241 MB/s | 6896 us, 250 MB/s |
+| canada.json, 2.3 MB | **1017 us**, 2214 MB/s | 1133 us, 1987 MB/s | 1747 us, 1289 MB/s | 15375 us, 146 MB/s |
 
-The bench also generates a font index shaped like the one Figma serves and vektra2 reads: 3000 files, 2.4 MB of
-pretty printed objects full of short strings and small arrays. "before" is the previous release. yyjson is the
-Homebrew build on macOS and Debian's package on Linux, found by CMake only when installed and only for this row.
-
-| font index, 2.4 MB | macOS before | macOS | Linux before | Linux |
+| write | cima `json_text` | yyjson 0.13 | bun `JSON.stringify` | nlohmann |
 | --- | --- | --- | --- | --- |
-| DOM parse, `json_parse` | 1735 us, 1392 MB/s | 1037 us, 2329 MB/s | 1559 us, 1549 MB/s | 1045 us, 2312 MB/s |
-| typed parse, `cima_parse_json` | 2005 us, 1205 MB/s | 1799 us, 1342 MB/s | 1831 us, 1319 MB/s | 1705 us, 1417 MB/s |
-| validate only, `cima_json_valid` | 1040 us, 2323 MB/s | 968 us, 2494 MB/s | 1122 us, 2152 MB/s | 1020 us, 2367 MB/s |
-| `yyjson_read`, for comparison | 777 us, 3107 MB/s | | 1289 us, 1873 MB/s | |
+| twitter.json | **51 us**, 9194 MB/s | 73 us, 6415 MB/s | 134 us, 3488 MB/s | 1031 us, 453 MB/s |
+| citm_catalog.json | **102 us**, 4921 MB/s | 106 us, 4738 MB/s | 1024 us, 488 MB/s | 971 us, 515 MB/s |
+| canada.json | **1074 us**, 1946 MB/s | 1182 us, 1768 MB/s | 1290 us, 1621 MB/s | 5958 us, 351 MB/s |
 
-`json_set` looks for its key before it appends a copy of it, so an object built with it costs a scan of its
-members per member. `json_obj_push` appends the member as is: the key is borrowed, a literal or a string in the
-arena, and must not be in the object yet, which a map from ids to nodes knows already. Keys are made beforehand:
+Both the DOM parser and the writer are the fastest of the four on all three files.
 
-| an object built member by member | macOS, 100 members | macOS, 10 000 members, 130 KB |
+The typed parser fills C structs straight from the text, with the checks of the schema, and takes about one and a half times as long as the DOM: every string is copied out into the value, every key is matched against the fields, and issues keep their JSON pointer.
+
+| operation | 1 file, 1.6 KB | 100 files, 156 KB | font index, 2.4 MB pretty printed |
+| --- | --- | --- | --- |
+| typed parse, `cima_parse_json` | 0.6 us | 62 us, 2523 MB/s | 941 us, 2566 MB/s |
+| typed encode, `cima_to_json` | 0.4 us | 39 us, 3974 MB/s | |
+| DOM parse, `json_parse` | 0.4 us | 36 us, 4363 MB/s | 670 us, 3605 MB/s |
+| DOM write, `json_text` | 0.2 us | 19 us, 8126 MB/s | |
+| builder envelope around a typed value | 0.4 us | 38 us, 4151 MB/s | |
+| validate only, `cima_json_valid` | 0.4 us | 34 us, 4573 MB/s | 735 us, 3284 MB/s |
+| `yyjson_read`, for comparison | | | 762 us, 3169 MB/s |
+
+The vektra payloads are the file object of `shape.rs`, 40 fields, in the `{error, status, meta, i18n}` envelope, alone and in a listing of 100. The font index is shaped like the one Figma serves and vektra2 reads: 3000 files of pretty printed objects full of short strings and small arrays.
+
+`json_set` looks for its key before it appends a copy of it, so an object built with it costs a scan of its members per member. `json_obj_push` appends the member as is: the key is borrowed, a literal or a string in the arena, and must not be in the object yet, which a map from ids to nodes knows already.
+
+| an object built member by member | 100 members | 10 000 members, 130 KB |
 | --- | --- | --- |
-| `json_set`, a lookup and a key copy | 18.1 us | 105 211 us, 1 MB/s |
-| `json_obj_push`, appended as is | 0.8 us | 105 us, 1241 MB/s |
+| `json_set`, a lookup and a key copy | 16.1 us | 95 747 us, 1 MB/s |
+| `json_obj_push`, appended as is | 0.8 us | 101 us, 1296 MB/s |
 
-macOS 27 with Apple clang 21, Linux 6 arm64 with Debian trixie and clang 19 in Docker's virtual machine, both on
-an Apple M4 Pro.
+What makes it fast:
 
-- **The DOM parser copies the text once.** Strings and keys without escapes point into the copy, ended by a nul
-  written over their closing quote, and escaped ones are decoded in place, so no string is allocated or copied on
-  its own. A loop over a stack of open containers replaces the recursion, keeps its stacks in locals, and reads
-  small integers without the general number scan. The arena holds the whole text, whitespace included, instead of
-  the string bytes alone, and a failed parse gives back everything it took.
-- **Strings are scanned eight bytes at a time** with word arithmetic, inlined where it pays: in the DOM and the
-  validator, while the typed parser is faster calling out. NEON compares were slower on an M4 for strings this
-  short, moving a vector mask to a register costs more than the scan.
-- **Whitespace is a plain loop.** The indentation of pretty printed JSON repeats, the branch predictor learns it,
-  and eight byte words were slower here. The DOM's copy ends with a nul, so its loop needs no bounds check.
-- **Short keys and strings**, up to 16 bytes, are compared and copied with two overlapping words instead of
-  calls to `memcmp` and `memcpy`.
-- Integers and timestamps are formatted without `snprintf`, doubles take a correctly rounded fast path, and every
-  allocation is an arena pointer bump.
+- **Both parsers read a copy of the text followed by 64 nul bytes.** Scans read whole words past the end without a bounds check, since a nul is never valid where one stops. The DOM keeps its strings in that copy, ended by a nul written over their closing quote, and decodes escaped ones in place.
+- **Pretty printed text is guessed.** A pretty printer indents every child of a container alike, so the whitespace before the next one is taken to be what came before the last: the pointer moves on by a number known in advance, and only the check that the guess holds waits for the loads, with a branch that predicts. The closing bracket sits at the parent's guess.
+- **Short strings and integers go a byte at a time with a branch each,** sixteen bytes for strings, nineteen digits for integers. The branches predict their lengths, so the loads of the next token start before the current one is done, where a word scan with a count of trailing zeros would make them wait. Longer strings go on eight bytes at a time: on an M4, NEON blocks lose to words there, since most runs end within a few words and a vector mask takes longer to reach a branch.
+- **Text past ASCII comes in runs of one script.** The parsers check UTF-8 two three byte characters per word load while they last, Chinese and Japanese text for instance, then one character at a time. The writer checks the strings it did not parse 16 bytes at a time with NEON, after Keiser and Lemire, which makes Japanese text four times faster to write than a character at a time.
+- **Numbers are read with Eisel-Lemire and written with Dragonbox,** over one table of 128 bit powers of ten. Dragonbox finds the shortest decimal from one product where Schubfach takes three, and Schubfach keeps the rare cases: powers of two, subnormals, and remainders on the edge of the interval. NEON turns the seventeen digits into text in one pass, finds the zeros at the end with one compare, and moves the fraction past the point with one table lookup. A fraction after an integer already read joins the mantissa without a second scan.
+- **The writer keeps the end of its buffer in a local,** so writing text never makes the compiler reload it. It walks containers with a stack instead of recursing, puts a comma after every child and turns the last one into the closing bracket, checks the room once per child, writes empty containers without the stack, and copies keys and strings from a parse with fixed moves of 16 or 32 bytes. Strings the parser checked skip the UTF-8 check, and integers are formatted eight digits at a time.
+- **Plain fields of the typed parser are read in place,** strings with no check, integers with no bounds and booleans, without the general path. The key a field expects next is compared with the text, quotes and colon included, before any scan or lookup. An object's fields and their JSON keys come from a cache built once per schema, and each parse keeps the last few at hand.
+- Every allocation is an arena pointer bump, and a failed parse gives back everything it took.
+
+Vector code sits behind a few helpers in `src/internal.h`, each with a scalar twin: NEON on arm64 for now, and other CPUs take the scalar paths. Defining `CIMA_NO_SIMD` forces them everywhere, which is how both are tested against each other.
 
 ## Formatting numbers
 
@@ -281,3 +279,5 @@ release/cima_bench twitter.json citm_catalog.json canada.json      # any json fi
 The tests cover a JSON conformance suite, every option and format, round trips, JSON Schema output, pairs and
 coercion, arenas against the heap and custom allocators, threads sharing the caches, and the DOM, writer,
 builder and diff. They pass under ASan and UBSan.
+
+Codecs are tested through decoding, encoding, schemas, text, pairs and heap disposal. Strings with every mix of escapes and UTF-8 are decoded at random against what they were made from, with bytes broken on purpose. Numbers are compared bit for bit with `strtod` on hundreds of millions of random decimals, halfway cases and subnormals, and the formatter with the reference it replaced, `CIMA_TEST_NUMBERS` and `CIMA_TEST_SEED` making the run longer or different. A build with `-DCMAKE_C_FLAGS=-DCIMA_NO_SIMD` runs the same tests on the scalar paths.
