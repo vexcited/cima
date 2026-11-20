@@ -133,8 +133,10 @@ double cima_json_as_double(const cima_json *v, double fallback);
 const char *cima_json_as_string(const cima_json *v, const char *fallback);
 
 // the fallback's type picks the reader: `CIMA_JSON_OR(v, 25)`, `CIMA_JSON_OR(v, "guest")`, `CIMA_JSON_OR(v, false)`.
+// `CIMA_JSON_OR(v, nullptr)` is the string or null.
 #define CIMA_JSON_OR(v, fallback)                                                                                \
   _Generic((fallback),                                                                                           \
+      nullptr_t: cima_json__string_or_null,                                                                      \
       bool: cima_json_as_bool,                                                                                   \
       float: cima_json_as_double,                                                                                \
       double: cima_json_as_double,                                                                               \
@@ -143,6 +145,30 @@ const char *cima_json_as_string(const cima_json *v, const char *fallback);
       char *: cima_json_as_string,                                                                               \
       const char *: cima_json_as_string,                                                                         \
       default: cima_json_as_int)(v, fallback)
+// the member `key` of `v` read the same way: `CIMA_JSON_GET_OR(user, "name", nullptr)`.
+#define CIMA_JSON_GET_OR(v, key, fallback) CIMA_JSON_OR(cima_json_get(v, key), fallback)
+
+static inline const char *cima_json__string_or_null(const cima_json *v, nullptr_t) {
+  return cima_json_as_string(v, nullptr);
+}
+
+// zod's z.coerce: numbers and booleans from strings too, as apis that write big numbers as text send them. a
+// number reads as a boolean that is not zero, "true", "1", "on" and "yes" as true and their opposites as false.
+// integers read from doubles that hold one exactly, and from strings holding a json number that is one.
+int64_t cima_json_coerce_int(const cima_json *v, int64_t fallback);
+uint64_t cima_json_coerce_uint(const cima_json *v, uint64_t fallback);
+double cima_json_coerce_double(const cima_json *v, double fallback);
+bool cima_json_coerce_bool(const cima_json *v, bool fallback);
+
+#define CIMA_JSON_COERCE(v, fallback)                                                                            \
+  _Generic((fallback),                                                                                           \
+      bool: cima_json_coerce_bool,                                                                               \
+      float: cima_json_coerce_double,                                                                            \
+      double: cima_json_coerce_double,                                                                           \
+      unsigned long: cima_json_coerce_uint,                                                                      \
+      unsigned long long: cima_json_coerce_uint,                                                                 \
+      default: cima_json_coerce_int)(v, fallback)
+#define CIMA_JSON_GET_COERCE(v, key, fallback) CIMA_JSON_COERCE(cima_json_get(v, key), fallback)
 
 /* building. CIMA_JSON_OBJ and CIMA_JSON_ARR need no allocator: the nodes are compound literals living until    */
 /* the end of the enclosing block, which is all a response needs. cima_json_clone keeps one for longer.         */

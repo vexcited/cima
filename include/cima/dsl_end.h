@@ -1,5 +1,6 @@
 #ifdef CIMA_DSL_H
 #undef CIMA_DSL_H
+#undef CIMA_JSON_DSL_H
 
 #undef boolean
 #undef i8
@@ -63,6 +64,9 @@
 #undef json_at
 #undef json_index
 #undef json_or
+#undef json_get_or
+#undef json_coerce
+#undef json_get_coerce
 #undef json_type
 #undef json_len
 #undef json_items

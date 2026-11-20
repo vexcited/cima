@@ -769,6 +769,57 @@ uint64_t cima_json_as_uint(const cima_json *v, uint64_t fallback) {
   return fallback;
 }
 
+// the number a string holds when it is one json number and nothing else, as a dom node.
+static bool number_in(const cima_json *v, cima_json *out) {
+  if (!v || v->type != CIMA_JSON_STRING || !v->len) return false;
+  cima__num n;
+  const char *end = v->str + v->len, *q = cima__scan_number(v->str, end, &n);
+  if (q != end) return false;
+  uint64_t mag;
+  if (n.plain && cima__num_magnitude(&n, &mag) == CIMA__INT_OK && (!n.neg || mag <= (uint64_t)INT64_MAX + 1)) {
+    if (n.neg) *out = (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)(0 - mag)};
+    else if (mag <= INT64_MAX) *out = (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)mag};
+    else *out = (cima_json){.type = CIMA_JSON_UINT, .u = mag};
+    return true;
+  }
+  *out = (cima_json){.type = CIMA_JSON_DOUBLE, .d = cima__num_double(&n, v->str, v->len)};
+  return true;
+}
+
+int64_t cima_json_coerce_int(const cima_json *v, int64_t fallback) {
+  cima_json n;
+  return number_in(v, &n) ? cima_json_as_int(&n, fallback) : cima_json_as_int(v, fallback);
+}
+
+uint64_t cima_json_coerce_uint(const cima_json *v, uint64_t fallback) {
+  cima_json n;
+  return number_in(v, &n) ? cima_json_as_uint(&n, fallback) : cima_json_as_uint(v, fallback);
+}
+
+double cima_json_coerce_double(const cima_json *v, double fallback) {
+  cima_json n;
+  return number_in(v, &n) ? cima_json_as_double(&n, fallback) : cima_json_as_double(v, fallback);
+}
+
+bool cima_json_coerce_bool(const cima_json *v, bool fallback) {
+  if (!v) return fallback;
+  switch (v->type) {
+  case CIMA_JSON_BOOL: return v->b;
+  case CIMA_JSON_INT: return v->i != 0;
+  case CIMA_JSON_UINT: return v->u != 0;
+  case CIMA_JSON_DOUBLE: return v->d != 0;
+  case CIMA_JSON_STRING: {
+    static const char *const yes[] = {"true", "1", "on", "yes"}, *const no[] = {"false", "0", "off", "no"};
+    for (int i = 0; i < 4; i++) {
+      if (strcmp(v->str, yes[i]) == 0) return true;
+      if (strcmp(v->str, no[i]) == 0) return false;
+    }
+    return fallback;
+  }
+  default: return fallback;
+  }
+}
+
 double cima_json_as_double(const cima_json *v, double fallback) {
   if (!v) return fallback;
   switch (v->type) {

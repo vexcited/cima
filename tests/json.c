@@ -12,6 +12,18 @@ static const char doc_text[] =
 
 static void reading(void) {
   with_arena(a) {
+    cima_json *person = parse(a, "{\"name\": \"ana\", \"age\": 31, \"nick\": null}");
+    CHECK_STR(json_get_or(person, "name", nullptr), "ana");
+    CHECK(json_get_or(person, "nick", nullptr) == nullptr && json_get_or(person, "age", nullptr) == nullptr);
+    CHECK(json_get_or(person, "age", 0) == 31 && json_get_or(person, "gone", 7) == 7);
+    CHECK_STR(json_get_or(person, "nick", "?"), "?");
+    cima_json *loose = parse(a, "{\"at\": \"1795096047115\", \"big\": \"18446744073709551615\", \"half\": \"2.5\", "
+                                "\"on\": \"yes\", \"one\": 1, \"word\": \"x\", \"real\": 4}");
+    CHECK(json_get_coerce(loose, "at", (int64_t)0) == 1795096047115 && json_get_or(loose, "at", (int64_t)0) == 0);
+    CHECK(json_get_coerce(loose, "big", (uint64_t)0) == UINT64_MAX && json_get_coerce(loose, "big", 7) == 7);
+    CHECK(json_get_coerce(loose, "half", 0.0) == 2.5 && json_get_coerce(loose, "half", 9) == 9);
+    CHECK(json_get_coerce(loose, "on", false) && json_get_coerce(loose, "one", false));
+    CHECK(json_get_coerce(loose, "word", 3) == 3 && json_get_coerce(loose, "real", 0) == 4);
     cima_json *doc = json_parse(a, doc_text, sizeof doc_text - 1, nullptr);
     CHECK(doc && json_type(doc) == CIMA_JSON_OBJECT && json_len(doc) == 10);
     CHECK_STR(json_or(json_get(doc, "name"), "?"), "vektra");

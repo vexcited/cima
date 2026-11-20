@@ -90,6 +90,8 @@ char *body = json_text(a, json_obj(
 
 cima_json *args = json_parse(a, text, len, &err);                  // any JSON, keys in order, all in `a`
 int64_t size = json_or(json_get(args, "firstPageSize"), 25);       // the fallback's type picks the reader
+const char *name = json_get_or(args, "name", nullptr);             // a member at once, the string or null
+int64_t at = json_get_coerce(args, "created_at", (int64_t)0);      // z.coerce: "1795096047115" reads too
 const char *name = json_or(json_at(args, "/files/0/name"), "?");   // JSON pointers, missing reads as the fallback
 each(type, json_items(json_get(args, "resourceTypes"))) { ... }
 
@@ -114,6 +116,8 @@ json_field(&w, "total", files.len);
 json_end_object(&w);
 char *text = json_finish(&w);
 ```
+
+`json_coerce` and `json_get_coerce` read numbers and booleans from strings too, for APIs that write big numbers as text, and a number as a boolean that is not zero. `cima_json_writer_text()` gives the text written so far, nul terminated and still the writer's, for a request body.
 
 A comparison is an `int` in C, so a boolean from one is written `(bool)(a < b)`. Builder nodes are copied into
 the arena by `json_clone` and by every function that stores them, typed values become their JSON on the way.
