@@ -26,6 +26,27 @@ void cima__newline(cima_json_writer *w) {
 // utf-8 sequences.
 static const char *clean_run(const char *p, const char *end) {
   for (;;) {
+#if CIMA__SIMD
+    // 16 bytes a step up to the last block that ends on a whole character, the words below find the exact stop.
+    cima__utf8 u = {};
+    const char *whole = p;
+    bool cut = false;
+    while (end - p >= 16) {
+      cima__v16 v = cima__load16(p);
+      if (!cima__special16(v) && !cut) {
+        u.prev = v;
+        whole = p += 16;
+        continue;
+      }
+      if (cima__stops16(v)) break;
+      cima__utf8_next(&u, v);
+      if (cima__any16(u.error)) break;
+      p += 16;
+      cut = cima__any16(u.incomplete);
+      if (!cut) whole = p;
+    }
+    p = whole;
+#endif
     while (end - p >= 8) {
       uint64_t m = cima__special(cima__load64(p)) & CIMA__HIGHS;
       if (m) {
@@ -47,36 +68,93 @@ static const char *clean_run(const char *p, const char *end) {
   }
 }
 
+// copies and scans at once, a word or a block at a time: what has nothing to escape is stored as it is, the room
+// for it is reserved up front with 16 bytes to spare.
 void cima__write_quoted(cima_json_writer *w, const char *s, size_t len) {
-  char *d = cima__reserve(w, len + 2);
+  char *d = cima__reserve(w, len + 18);
   const char *end = s + len;
-  const char *q = clean_run(s, end);
-  d[0] = '"';
-  memcpy(d + 1, s, (size_t)(q - s));
-  w->len += (size_t)(q - s) + 1;
-  while (q < end) {
-    unsigned char c = (unsigned char)*q++;
-    switch (c) {
-    case '"': cima__put(w, "\\\"", 2); break;
-    case '\\': cima__put(w, "\\\\", 2); break;
-    case '\n': cima__put(w, "\\n", 2); break;
-    case '\r': cima__put(w, "\\r", 2); break;
-    case '\t': cima__put(w, "\\t", 2); break;
-    case '\b': cima__put(w, "\\b", 2); break;
-    case '\f': cima__put(w, "\\f", 2); break;
-    default:
-      if (c >= 0x80) {
-        cima__put(w, "\xef\xbf\xbd", 3);
-      } else {
-        char u[6] = {'\\', 'u', '0', '0', "0123456789abcdef"[c >> 4], "0123456789abcdef"[c & 15]};
-        cima__put(w, u, 6);
+  *d++ = '"';
+  for (;;) {
+#if CIMA__SIMD
+    // as clean_run does, storing the blocks as they go: the ones past the last whole character are stored again.
+    cima__utf8 u = {};
+    const char *whole = s;
+    char *at = d;
+    bool cut = false;
+    while (end - s >= 16) {
+      cima__v16 v = cima__load16(s);
+      cima__store16(d, v);
+      if (!cima__special16(v) && !cut) {
+        u.prev = v;
+        whole = s += 16;
+        at = d += 16;
+        continue;
+      }
+      if (cima__stops16(v)) break;
+      cima__utf8_next(&u, v);
+      if (cima__any16(u.error)) break;
+      s += 16;
+      d += 16;
+      cut = cima__any16(u.incomplete);
+      if (!cut) {
+        whole = s;
+        at = d;
       }
     }
-    const char *r = clean_run(q, end);
-    cima__put(w, q, (size_t)(r - q));
-    q = r;
+    s = whole;
+    d = at;
+#endif
+    while (end - s >= 8) {
+      uint64_t x = cima__load64(s);
+      memcpy(d, &x, 8);
+      uint64_t m = cima__special(x) & CIMA__HIGHS;
+      if (m) {
+        size_t k = (size_t)__builtin_ctzll(m) >> 3;
+        s += k;
+        d += k;
+        goto special;
+      }
+      s += 8;
+      d += 8;
+    }
+    while (s < end && (unsigned char)*s >= 0x20 && *s != '"' && *s != '\\' && (unsigned char)*s < 0x80) *d++ = *s++;
+    if (s == end) break;
+  special:;
+    unsigned char c = (unsigned char)*s;
+    if (c >= 0x80) {
+      size_t n = cima__utf8_seq((const unsigned char *)s, (const unsigned char *)end);
+      if (n) {
+        for (size_t i = 0; i < n; i++) d[i] = s[i];
+        d += n;
+        s += n;
+        continue;
+      }
+    }
+    // escapes grow the text: the length so far goes back to the writer, which makes room for the worst case.
+    w->len = (size_t)(d - w->buf);
+    d = cima__reserve(w, (size_t)(end - s) + 16);
+    switch (c) {
+    case '"': memcpy(d, "\\\"", 2), d += 2; break;
+    case '\\': memcpy(d, "\\\\", 2), d += 2; break;
+    case '\n': memcpy(d, "\\n", 2), d += 2; break;
+    case '\r': memcpy(d, "\\r", 2), d += 2; break;
+    case '\t': memcpy(d, "\\t", 2), d += 2; break;
+    case '\b': memcpy(d, "\\b", 2), d += 2; break;
+    case '\f': memcpy(d, "\\f", 2), d += 2; break;
+    default:
+      if (c >= 0x80) {
+        memcpy(d, "\xef\xbf\xbd", 3);
+        d += 3;
+      } else {
+        char u[6] = {'\\', 'u', '0', '0', "0123456789abcdef"[c >> 4], "0123456789abcdef"[c & 15]};
+        memcpy(d, u, 6);
+        d += 6;
+      }
+    }
+    s++;
   }
-  cima__putc(w, '"');
+  *d++ = '"';
+  w->len = (size_t)(d - w->buf);
 }
 
 void cima_json_write_null(cima_json_writer *w) {
@@ -214,9 +292,342 @@ static void write_key_member(cima_json_writer *w, const cima_json_member *m) {
   cima_json_write_key_n(w, m->key, len);
 }
 
+/* compact output of a dom, the common case, with the buffer's end in a local and no comma state per value. */
+
+// the first entry is zero so that zero has one digit.
+// eight digits of x below 10^8 as ascii in a word, the first digit in the lowest byte: the halves, then the
+// pairs, then the digits are split in every lane at once, with multiplications standing for the divisions.
+static inline uint64_t dw_eight(uint32_t x) {
+  uint64_t v = (x / 10000) | ((uint64_t)(x % 10000) << 32);
+  uint64_t q = ((v * 10486) >> 20) & 0x0000007f0000007full;
+  v = q | ((v - q * 100) << 16);
+  q = ((v * 103) >> 10) & 0x000f000f000f000full;
+  v = q | ((v - q * 10) << 8);
+  return v + 0x3030303030303030ull;
+}
+
+// the digits of x below 10^8 at d without the zeros in front, at least one digit. returns their count.
+[[gnu::always_inline]] static inline size_t dw_lead(char *d, uint32_t x) {
+  uint64_t w = dw_eight(x);
+  unsigned z = (unsigned)__builtin_ctzll((w ^ CIMA__ONES * '0') | 1ull << 56) & ~7u;
+  w >>= z;
+  memcpy(d, &w, 8);
+  return 8 - z / 8;
+}
+
+// the digits of v at d, which has room for 24 bytes past them. returns their count. eight digits a word, the
+// zeros in front found in the word rather than counted first.
+[[gnu::always_inline]] static inline size_t dw_u64(char *d, uint64_t v) {
+  if (v < 100000000) return dw_lead(d, (uint32_t)v);
+  uint64_t hi = v / 100000000, low = dw_eight((uint32_t)(v - hi * 100000000));
+  size_t n;
+  if (hi < 100) {
+    // ids of nine or ten digits are common, their head goes digit by digit.
+    n = 9 + (hi >= 10);
+    d[0] = (char)('0' + hi / 10);
+    d[n - 9] = (char)('0' + hi % 10);
+    memcpy(d + n - 8, &low, 8);
+    return n;
+  }
+  if (hi < 100000000) {
+    n = dw_lead(d, (uint32_t)hi);
+  } else {
+    uint64_t top = hi / 100000000, mid = dw_eight((uint32_t)(hi - top * 100000000));
+    n = dw_lead(d, (uint32_t)top);
+    memcpy(d + n, &mid, 8);
+    n += 8;
+  }
+  memcpy(d + n, &low, 8);
+  return n + 8;
+}
+
+// n bytes from s at d, which has room for 32 more: short copies take overlapping moves instead of a call.
+static inline void dw_copy(char *d, const char *s, size_t n) {
+  if (n <= 16) {
+    cima__copy(d, s, n);
+  } else if (n <= 32) {
+    __builtin_memcpy_inline(d, s, 16);
+    __builtin_memcpy_inline(d + n - 16, s + n - 16, 16);
+  } else {
+    memcpy(d, s, n);
+  }
+}
+
+// the same when 32 bytes past the end of s can be read: a string of a parse. a copy of 16 or 32 bytes then
+// takes no branch on the length.
+static inline void dw_copy_padded(char *d, const char *s, size_t n) {
+  if (LIKELY(n <= 16)) __builtin_memcpy_inline(d, s, 16);
+  else if (n <= 32) __builtin_memcpy_inline(d, s, 32);
+  else memcpy(d, s, n);
+}
+
+[[gnu::noinline]] static char *dw_grow(cima_json_writer *w, char *d, size_t need) {
+  w->len = (size_t)(d - w->buf);
+  cima__writer_grow(w, need);
+  return w->buf + w->len;
+}
+
+// `lim` is the end of the buffer in a local, so stores of text never make the compiler reload it.
+#define DW_ROOM(n)                                                                                               \
+  do {                                                                                                           \
+    if (UNLIKELY((size_t)(*lim - d) < (n))) {                                                                    \
+      d = dw_grow(w, d, n);                                                                                      \
+      *lim = w->buf + w->cap;                                                                                    \
+    }                                                                                                            \
+  } while (0)
+
+// a quoted string through the general escaping, between two stretches of the fast path.
+static char *dw_quoted(cima_json_writer *w, char *d, const char *s, size_t len) {
+  w->len = (size_t)(d - w->buf);
+  cima__write_quoted(w, s, len);
+  return w->buf + w->len;
+}
+
+// a quoted string known to be valid utf-8: only quotes, backslashes and control characters need a look.
+static char *dw_escaped(cima_json_writer *w, char *d, const char *s, size_t len) {
+  const char *end = s + len;
+  char *limit = w->buf + w->cap, **lim = &limit;
+  DW_ROOM(len + 40);
+  *d++ = '"';
+  for (;;) {
+    const char *r = s;
+#if CIMA__SIMD
+    while (end - r >= 16) {
+      uint64_t m = cima__stops16(cima__load16(r));
+      if (m) {
+        r += cima__lane(m);
+        goto special;
+      }
+      r += 16;
+    }
+#endif
+    while (end - r >= 8) {
+      uint64_t x = cima__load64(r);
+      uint64_t q = x ^ (CIMA__ONES * '"'), b = x ^ (CIMA__ONES * '\\');
+      uint64_t m = (((q - CIMA__ONES) & ~q) | ((b - CIMA__ONES) & ~b) | ((x - CIMA__ONES * 0x20) & ~x)) & CIMA__HIGHS;
+      if (m) {
+        r += __builtin_ctzll(m) >> 3;
+        goto special;
+      }
+      r += 8;
+    }
+    while (r < end && *r != '"' && *r != '\\' && (unsigned char)*r >= 0x20) r++;
+  special:
+    DW_ROOM((size_t)(r - s) + 40);
+    dw_copy(d, s, (size_t)(r - s));
+    d += r - s;
+    if (r == end) break;
+    unsigned char c = (unsigned char)*r;
+    d[0] = '\\';
+    switch (c) {
+    case '"': d[1] = '"'; d += 2; break;
+    case '\\': d[1] = '\\'; d += 2; break;
+    case '\n': d[1] = 'n'; d += 2; break;
+    case '\r': d[1] = 'r'; d += 2; break;
+    case '\t': d[1] = 't'; d += 2; break;
+    case '\b': d[1] = 'b'; d += 2; break;
+    case '\f': d[1] = 'f'; d += 2; break;
+    default:
+      memcpy(d + 1, "u00", 3);
+      d[4] = "0123456789abcdef"[c >> 4];
+      d[5] = "0123456789abcdef"[c & 15];
+      d += 6;
+    }
+    s = r + 1;
+  }
+  *d++ = '"';
+  return d;
+}
+
+static char *dw_value(cima_json_writer *w, char *d, const cima_json *v);
+
+// the room a scalar takes at most, a comma after it included, when it is no string.
+constexpr size_t DW_SCALAR = 40;
+
+// any value but a container, inlined into the loops over children so that only containers cost a call. the
+// caller made room for DW_SCALAR bytes, and two bytes are left after any value for the comma. the node is read
+// into a local once, stores of text would make the compiler reload it otherwise. calls that grow the buffer
+// behind its back are followed by a fresh `lim`.
+[[gnu::always_inline]] static inline char *dw_scalar(cima_json_writer *w, char *d, char **lim, const cima_json *node) {
+  cima_json v = *node;
+  switch (v.type) {
+  case CIMA_JSON_NULL:
+    memcpy(d, "null", 4);
+    return d + 4;
+  case CIMA_JSON_BOOL:
+    if (v.b) {
+      memcpy(d, "true", 4);
+      return d + 4;
+    }
+    memcpy(d, "false", 5);
+    return d + 5;
+  case CIMA_JSON_INT: {
+    uint64_t u = (uint64_t)v.i;
+    *d = '-';
+    d += v.i < 0;
+    return d + dw_u64(d, v.i < 0 ? 0 - u : u);
+  }
+  case CIMA_JSON_UINT: return d + dw_u64(d, v.u);
+  case CIMA_JSON_DOUBLE:
+    if (!isfinite(v.d)) {
+      memcpy(d, "null", 4);
+      return d + 4;
+    }
+    return d + cima__fmt_double(d, v.d);
+  case CIMA_JSON_STRING:
+    if (!(v.flags & CIMA_JSON__CLEAN)) {
+      d = v.flags & CIMA_JSON__UTF8 ? dw_escaped(w, d, v.str, v.len) : dw_quoted(w, d, v.str, v.len);
+      *lim = w->buf + w->cap;
+      DW_ROOM(2);
+      return d;
+    }
+    DW_ROOM((size_t)v.len + 34);
+    *d = '"';
+    if (v.flags & CIMA_JSON__PADDED) dw_copy_padded(d + 1, v.str, v.len);
+    else dw_copy(d + 1, v.str, v.len);
+    d[v.len + 1] = '"';
+    return d + v.len + 2;
+  case CIMA_JSON_RAW:
+    DW_ROOM((size_t)v.len + 2);
+    memcpy(d, v.str, v.len);
+    return d + v.len;
+  case CIMA_JSON_TYPED:
+    // the writer takes over, told that a separator is already there.
+    w->len = (size_t)(d - w->buf);
+    w->after_key = true;
+    cima_json_write_typed(w, v.typed->schema, v.typed->value);
+    *lim = w->buf + w->cap;
+    d = w->buf + w->len;
+    DW_ROOM(2);
+    return d;
+  default:
+    d = dw_value(w, d, node);
+    *lim = w->buf + w->cap;
+    DW_ROOM(2);
+    return d;
+  }
+}
+
+// containers without recursion: a stack of the open ones and where each stands, deeper trees than it holds go
+// on in a call of their own. every child is followed by a comma, and the last one becomes the closing bracket,
+// so no child asks whether it comes first.
+static char *dw_value(cima_json_writer *w, char *d, const cima_json *v) {
+  struct {
+    const void *at, *stop;
+    bool object;
+  } stack[128];
+  uint32_t depth = 0;
+  const cima_json *it = nullptr, *items_end = nullptr, *child;
+  const cima_json_member *mt = nullptr, *members_end = nullptr;
+  char *limit = w->buf + w->cap, **lim = &limit;
+  if (v->type != CIMA_JSON_ARRAY && v->type != CIMA_JSON_OBJECT) {
+    DW_ROOM(DW_SCALAR);
+    return dw_scalar(w, d, lim, v);
+  }
+  child = v;
+  goto open;
+array:
+  while (it != items_end) {
+    child = it++;
+    DW_ROOM(DW_SCALAR);
+    if (child->type == CIMA_JSON_ARRAY || child->type == CIMA_JSON_OBJECT) {
+      // empty ones, a good part of the containers in many documents, need no stack.
+      if (!child->len) {
+        memcpy(d, child->type == CIMA_JSON_ARRAY ? "[]," : "{},", 4);
+        d += 3;
+        continue;
+      }
+      stack[depth] = (typeof(*stack)){it, items_end, false};
+      goto push;
+    }
+    d = dw_scalar(w, d, lim, child);
+    *d++ = ',';
+  }
+  if (d[-1] == ',') d[-1] = ']';
+  else *d++ = ']';
+  goto close;
+object:
+  while (mt != members_end) {
+    cima_json_member m = *mt++;
+    size_t len = m.key_len ? m.key_len : strlen(m.key);
+    // one check of the room for the key, a scalar and the comma after it.
+    DW_ROOM(len + 36 + DW_SCALAR);
+    if (LIKELY(m.flags & CIMA_JSON__CLEAN)) {
+      *d = '"';
+      if (m.flags & CIMA_JSON__PADDED) dw_copy_padded(d + 1, m.key, len);
+      else dw_copy(d + 1, m.key, len);
+      memcpy(d + len + 1, "\":", 2);
+      d += len + 3;
+    } else {
+      d = m.flags & CIMA_JSON__UTF8 ? dw_escaped(w, d, m.key, len) : dw_quoted(w, d, m.key, len);
+      limit = w->buf + w->cap;
+      DW_ROOM(1 + DW_SCALAR);
+      *d++ = ':';
+    }
+    child = &mt[-1].value;
+    if (m.value.type == CIMA_JSON_ARRAY || m.value.type == CIMA_JSON_OBJECT) {
+      if (!m.value.len) {
+        memcpy(d, m.value.type == CIMA_JSON_ARRAY ? "[]," : "{},", 4);
+        d += 3;
+        continue;
+      }
+      stack[depth] = (typeof(*stack)){mt, members_end, true};
+      goto push;
+    }
+    d = dw_scalar(w, d, lim, child);
+    *d++ = ',';
+  }
+  if (d[-1] == ',') d[-1] = '}';
+  else *d++ = '}';
+close:
+  if (!depth) return d;
+  depth--;
+  DW_ROOM(2);
+  *d++ = ',';
+  if (stack[depth].object) {
+    mt = stack[depth].at;
+    members_end = stack[depth].stop;
+    goto object;
+  }
+  it = stack[depth].at;
+  items_end = stack[depth].stop;
+  goto array;
+push:
+  if (UNLIKELY(depth == sizeof stack / sizeof *stack)) {
+    d = dw_value(w, d, child);
+    limit = w->buf + w->cap;
+    DW_ROOM(2);
+    *d++ = ',';
+    if (stack[depth].object) goto object;
+    goto array;
+  }
+  depth++;
+open:
+  DW_ROOM(2);
+  if (child->type == CIMA_JSON_OBJECT) {
+    *d++ = '{';
+    mt = child->members;
+    members_end = mt + child->len;
+    goto object;
+  }
+  *d++ = '[';
+  it = child->items;
+  items_end = it + child->len;
+  goto array;
+}
+
+#undef DW_ROOM
+
 void cima_json_write(cima_json_writer *w, const cima_json *v) {
   if (!v) {
     cima_json_write_null(w);
+    return;
+  }
+  if (LIKELY(!w->indent)) {
+    cima__pre(w);
+    cima__reserve(w, 64);
+    w->len = (size_t)(dw_value(w, w->buf + w->len, v) - w->buf);
+    w->comma = true;
     return;
   }
   switch (v->type) {

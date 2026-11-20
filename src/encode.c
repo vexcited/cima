@@ -14,7 +14,9 @@ static void write_fields(cima_json_writer *w, const cima_schema *s, const char *
     if (fs->kind == CIMA_KIND_OPTIONAL && !*(const bool *)field) continue;
     if (LIKELY(!w->indent)) {
       cima__pre(w);
-      cima__put(w, info->quoted[i], info->quoted_lens[i]);
+      size_t n = info->quoted_lens[i];
+      cima__copy(cima__reserve(w, n), info->quoted[i], n);
+      w->len += n;
       w->after_key = true;
     } else {
       cima_json_write_key_n(w, info->names[i], info->lens[i]);
