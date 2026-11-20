@@ -409,17 +409,26 @@ const char *cima__skip(const char *p, const char *end, uint32_t depth, cima__lex
   }
 }
 
+// on a padded copy in scratch, where the scans need no bounds checks.
 bool cima_json_valid(const char *text, size_t len) {
-  cima__lex_error err;
-  const char *end = text + len;
-  const char *p = cima__skip(text, end, 512, &err);
-  return p && cima__ws(p, end) == end;
+  bool ok = false;
+  CILO_SCRATCH(tmp) {
+    char *copy = cilo_arena_alloc(tmp, len + CIMA__PAD, 16);
+    if (len) memcpy(copy, text, len);
+    memset(copy + len, 0, CIMA__PAD);
+    cima__lex_error err;
+    const char *p = cima__pad_skip(copy, copy + len, 512, &err);
+    ok = p && cima__pad_ws(p) == copy + len;
+  }
+  return ok;
 }
 
 /* ========================================================================================================== */
-/* dom parser. the text is copied into the arena once: strings and keys point into the copy, ended by a nul   */
-/* written over their closing quote, and escaped ones are decoded in place. a loop over a stack of open        */
-/* containers gathers their children in a scratch arena, and each container takes an exact copy when it ends. */
+/* dom parser. the text is copied into the arena once, followed by nuls: strings and keys point into the copy, */
+/* ended by a nul written over their closing quote, and escaped ones are decoded in place. the padding lets   */
+/* every scan read whole words past the end, a nul is never valid where a scan stops. arrays and objects have */
+/* loops of their own over a stack of open containers, children gather in a scratch arena and each container */
+/* takes an exact copy when it ends.                                                                          */
 /* ========================================================================================================== */
 
 constexpr uint32_t DOM_MAX_DEPTH = 512;
@@ -427,12 +436,14 @@ constexpr uint32_t DOM_MAX_DEPTH = 512;
 typedef struct dom {
   cilo_arena *a;
   cilo_arena *tmp;
+  const char *end;
   const char *msg;
 } dom;
 
-// an open container: where its children start on their stack.
+// an open container: where its children start on their stack, and the indentation guess of its parent.
 typedef struct dom_frame {
   size_t base;
+  uint32_t indent;
   bool object;
 } dom_frame;
 
@@ -441,198 +452,500 @@ typedef struct dom_stack {
   size_t cap;
 } dom_stack;
 
+// the stacks keep 32 bytes of slack past their capacity, so dom_copy may read a word past the last child.
 [[gnu::noinline]] static dom_stack dom_grow(cilo_arena *tmp, dom_stack s, size_t size, size_t first) {
   size_t cap = s.cap ? s.cap * 2 : first;
-  return (dom_stack){cilo_arena_realloc(tmp, s.items, s.cap * size, cap * size, 16), cap};
+  return (dom_stack){cilo_arena_realloc(tmp, s.items, s.cap ? s.cap * size + 32 : 0, cap * size + 32, 16), cap};
 }
 
-// the string whose opening quote is at p, in the copy. returns what follows it, or null with `msg` set.
-[[gnu::always_inline]] static inline char *dom_string(dom *d, char *p, const char *end, const char **str,
-                                                      uint32_t *len, uint8_t *flags) {
-  cima__str s;
-  const char *q = cima__scan_string_inline(p, end, &s, &d->msg);
-  if (!q) return nullptr;
-  if (s.len > UINT32_MAX) {
-    d->msg = "string too long";
-    return nullptr;
+// the children of a container, copied into an exact block of the arena rounded up to 32 bytes. most containers
+// are small, and a loop of 32 byte moves beats a call to memcpy for them.
+[[gnu::always_inline]] static inline void *dom_copy(cilo_arena *a, const void *src, size_t bytes) {
+  size_t rounded = (bytes + 31) & ~(size_t)31;
+  char *dst = cilo_arena_alloc(a, rounded, 16);
+  if (UNLIKELY(rounded > 256)) return memcpy(dst, src, bytes);
+  for (size_t i = 0; i < rounded; i += 32) __builtin_memcpy_inline(dst + i, (const char *)src + i, 32);
+  return dst;
+}
+
+// the k low bytes of `x` at w.
+static inline char *dom_put_low(char *w, uint64_t x, unsigned k) {
+  if (k & 4) {
+    uint32_t v = (uint32_t)x;
+    memcpy(w, &v, 4);
+    x >>= 32;
+    w += 4;
   }
-  char *body = p + 1;
-  size_t n = s.len;
-  if (s.escaped) {
-    n = cima__unescape(body, body, n);
-    *flags = 0;
-  } else {
-    // no escapes in the source means no quote, backslash or control character, and the utf-8 is valid.
-    *flags = CIMA_JSON__CLEAN;
+  if (k & 2) {
+    uint16_t v = (uint16_t)x;
+    memcpy(w, &v, 2);
+    x >>= 16;
+    w += 2;
   }
-  body[n] = '\0';
+  if (k & 1) *w++ = (char)x;
+  return w;
+}
+
+// the escape at p decoded at *w. returns what follows it, or null with `msg` set.
+[[gnu::always_inline]] static inline char *dom_escape(dom *d, char *p, char **w) {
+  switch (p[1]) {
+  case '"': *(*w)++ = '"'; return p + 2;
+  case '\\': *(*w)++ = '\\'; return p + 2;
+  case '/': *(*w)++ = '/'; return p + 2;
+  case 'b': *(*w)++ = '\b'; return p + 2;
+  case 'f': *(*w)++ = '\f'; return p + 2;
+  case 'n': *(*w)++ = '\n'; return p + 2;
+  case 'r': *(*w)++ = '\r'; return p + 2;
+  case 't': *(*w)++ = '\t'; return p + 2;
+  case 'u': {
+    int32_t u = cima__hex4(p + 2);
+    if (u < 0) return d->msg = "invalid escape", nullptr;
+    if (u >= 0xdc00 && u <= 0xdfff) return d->msg = "lone low surrogate", nullptr;
+    if (u >= 0xd800 && u <= 0xdbff) {
+      int32_t lo = p[6] == '\\' && p[7] == 'u' ? cima__hex4(p + 8) : -1;
+      if (lo < 0xdc00 || lo > 0xdfff) return d->msg = "lone high surrogate", nullptr;
+      u = 0x10000 + ((u - 0xd800) << 10) + (lo - 0xdc00);
+      p += 6;
+    }
+    *w = cima__put_utf8(*w, (uint32_t)u);
+    return p + 6;
+  }
+  default: return d->msg = p + 1 >= d->end ? "unterminated string" : "invalid escape", nullptr;
+  }
+}
+
+// the rest of a string past its plain ascii start, with utf-8, escapes and errors. `w` is null until an escape
+// is decoded, then the body is moved down as it is read. a word stored at w never reaches a byte not read yet:
+// w is behind p, and the last word of a run only stores the bytes before the special one.
+[[gnu::noinline]] static char *dom_string_rest(dom *d, char *body, char *p, const char **str, uint32_t *len,
+                                               uint8_t *flags) {
+  char *w = nullptr;
+  for (;;) {
+    unsigned char c = (unsigned char)*p;
+    if (c >= 0x80) {
+      // text past ascii comes in runs of one script, cjk is three bytes a character: such runs take a check of
+      // one word per character. a word stored at w never reaches the next character, w is behind p.
+      for (;;) {
+        // two at once while both are three bytes and neither lead is e0 or ed, the leads with a range of their own.
+        uint64_t x = cima__load64(p);
+        if ((x & 0xc0c0f0c0c0f0ull) == 0x8080e08080e0ull) {
+          unsigned l0 = x & 0x0f, l1 = (x >> 24) & 0x0f;
+          if (l0 != 0 && l0 != 0xd && l1 != 0 && l1 != 0xd) {
+            if (w) {
+              uint32_t lo = (uint32_t)x;
+              uint16_t hi = (uint16_t)(x >> 32);
+              memcpy(w, &lo, 4);
+              memcpy(w + 4, &hi, 2);
+              w += 6;
+            }
+            p += 6;
+            continue;
+          }
+        }
+        uint32_t u = (uint32_t)x;
+        if ((u & 0xc0c0f0) == 0x8080e0) {
+          unsigned lead = u & 0xff, next = (u >> 8) & 0xff;
+          if ((lead == 0xe0 && next < 0xa0) || (lead == 0xed && next >= 0xa0)) break;
+          if (w) {
+            memcpy(w, &u, 4);
+            w += 3;
+          }
+          p += 3;
+        } else if ((u & 0xc0e0) == 0x80c0 && (u & 0x1e)) {
+          if (w) {
+            uint16_t two = (uint16_t)u;
+            memcpy(w, &two, 2);
+            w += 2;
+          }
+          p += 2;
+        } else {
+          break;
+        }
+      }
+      if ((unsigned char)*p < 0x80) continue;
+      size_t n = cima__utf8_seq((const unsigned char *)p, (const unsigned char *)p + 4);
+      if (UNLIKELY(!n)) return d->msg = "invalid utf-8", nullptr;
+      if (w) {
+        for (size_t i = 0; i < n; i++) w[i] = p[i];
+        w += n;
+      }
+      p += n;
+      continue;
+    }
+    if (c == '"') break;
+    if (c == '\\') {
+      if (!w) w = p;
+      if (!(p = dom_escape(d, p, &w))) return nullptr;
+      continue;
+    }
+    if (c < 0x20) return d->msg = p >= d->end ? "unterminated string" : "control character in string", nullptr;
+    // a plain run.
+    for (;;) {
+      uint64_t x = cima__load64(p);
+      uint64_t m = cima__special(x) & CIMA__HIGHS;
+      if (m) {
+        unsigned k = (unsigned)__builtin_ctzll(m) >> 3;
+        if (w) w = dom_put_low(w, x, k);
+        p += k;
+        break;
+      }
+      if (w) {
+        memcpy(w, &x, 8);
+        w += 8;
+      }
+      p += 8;
+    }
+  }
+  if (UNLIKELY((size_t)(p - body) > UINT32_MAX)) return d->msg = "string too long", nullptr;
+  char *stop = w ? w : p;
+  *stop = '\0';
   *str = body;
-  *len = (uint32_t)n;
-  return (char *)q;
+  *len = (uint32_t)(stop - body);
+  *flags = (w ? CIMA_JSON__UTF8 : CIMA_JSON__CLEAN | CIMA_JSON__UTF8) | CIMA_JSON__PADDED;
+  return p + 1;
 }
 
-// the copy ends with a nul, which is not whitespace, so skipping whitespace in it needs no bounds check.
-static inline char *dom_ws(char *p) {
-  while ((unsigned char)*p <= ' ' && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
-  return p;
+static inline char *dom_ws(char *p) { return (char *)cima__pad_ws(p); }
+
+// checks the rest of a string in padded text past its plain ascii start at p, with no copy: utf-8 in runs of one
+// length as dom_string_rest reads them, escapes and errors. fills `out` and returns what follows the string, or
+// null with `err` set.
+const char *cima__pad_string_rest(const char *body, const char *p, const char *end, cima__str *out,
+                                  const char **err) {
+  bool escaped = false;
+  for (;;) {
+    unsigned char c = (unsigned char)*p;
+    if (c >= 0x80) {
+      for (;;) {
+        uint64_t x = cima__load64(p);
+        if ((x & 0xc0c0f0c0c0f0ull) == 0x8080e08080e0ull) {
+          unsigned l0 = x & 0x0f, l1 = (x >> 24) & 0x0f;
+          if (l0 != 0 && l0 != 0xd && l1 != 0 && l1 != 0xd) {
+            p += 6;
+            continue;
+          }
+        }
+        uint32_t u = (uint32_t)x;
+        if ((u & 0xc0c0f0) == 0x8080e0) {
+          unsigned lead = u & 0xff, next = (u >> 8) & 0xff;
+          if ((lead == 0xe0 && next < 0xa0) || (lead == 0xed && next >= 0xa0)) break;
+          p += 3;
+        } else if ((u & 0xc0e0) == 0x80c0 && (u & 0x1e)) {
+          p += 2;
+        } else {
+          break;
+        }
+      }
+      if ((unsigned char)*p < 0x80) continue;
+      size_t n = cima__utf8_seq((const unsigned char *)p, (const unsigned char *)p + 4);
+      if (!n) return *err = "invalid utf-8", nullptr;
+      p += n;
+      continue;
+    }
+    if (c == '"') break;
+    if (c == '\\') {
+      escaped = true;
+      switch (p[1]) {
+      case '"': case '\\': case '/': case 'b': case 'f': case 'n': case 'r': case 't': p += 2; continue;
+      case 'u': {
+        int32_t u = cima__hex4(p + 2);
+        if (u < 0) return *err = "invalid escape", nullptr;
+        if (u >= 0xdc00 && u <= 0xdfff) return *err = "lone low surrogate", nullptr;
+        if (u >= 0xd800 && u <= 0xdbff) {
+          int32_t lo = p[6] == '\\' && p[7] == 'u' ? cima__hex4(p + 8) : -1;
+          if (lo < 0xdc00 || lo > 0xdfff) return *err = "lone high surrogate", nullptr;
+          p += 6;
+        }
+        p += 6;
+        continue;
+      }
+      default: return *err = p + 1 >= end ? "unterminated string" : "invalid escape", nullptr;
+      }
+    }
+    if (c < 0x20) return *err = p >= end ? "unterminated string" : "control character in string", nullptr;
+    for (;;) {
+      uint64_t m = cima__special(cima__load64(p)) & CIMA__HIGHS;
+      if (m) {
+        p += __builtin_ctzll(m) >> 3;
+        break;
+      }
+      p += 8;
+    }
+  }
+  *out = (cima__str){body, (size_t)(p - body), escaped};
+  return p + 1;
+}
+
+// the string whose opening quote is at p. returns what follows it, or null with `msg` set.
+[[gnu::always_inline]] static inline char *dom_string(dom *d, char *p, const char **str, uint32_t *len,
+                                                      uint8_t *flags) {
+  char *body = p + 1;
+  p = body;
+  // a byte at a time for the first 16, most keys and strings: each step is a branch of its own, which predicts
+  // the length the way a word scan cannot, and the next token's loads start before this one is done.
+#define DOM_STEP(i)                                                                                              \
+  if (UNLIKELY(!cima__plain[(unsigned char)p[i]])) {                                                               \
+    p += i;                                                                                                      \
+    goto stop;                                                                                                   \
+  }
+  DOM_STEP(0) DOM_STEP(1) DOM_STEP(2) DOM_STEP(3) DOM_STEP(4) DOM_STEP(5) DOM_STEP(6) DOM_STEP(7)
+  DOM_STEP(8) DOM_STEP(9) DOM_STEP(10) DOM_STEP(11) DOM_STEP(12) DOM_STEP(13) DOM_STEP(14) DOM_STEP(15)
+#undef DOM_STEP
+  p = (char *)cima__special_run(p + 16);
+stop:
+  if (LIKELY(*p == '"' && (size_t)(p - body) <= UINT32_MAX)) {
+    // no escapes in the source means no quote, backslash or control character, and the utf-8 is valid.
+    *p = '\0';
+    *str = body;
+    *len = (uint32_t)(p - body);
+    *flags = CIMA_JSON__CLEAN | CIMA_JSON__UTF8 | CIMA_JSON__PADDED;
+    return p + 1;
+  }
+  return dom_string_rest(d, body, p, str, len, flags);
+}
+
+static uint32_t word4(const char *s) { return cima__load32(s); }
+
+// a string, number or literal at p into `v`. returns what follows it, or null with `msg` set.
+[[gnu::always_inline]] static inline char *dom_scalar(dom *d, char *p, cima_json *v) {
+  switch (*p) {
+  case '"':
+    v->type = CIMA_JSON_STRING;
+    return dom_string(d, p, &v->str, &v->len, &v->flags);
+  case 't':
+    if (cima__load32(p) != word4("true")) return d->msg = "invalid literal", nullptr;
+    *v = (cima_json){.type = CIMA_JSON_BOOL, .b = true};
+    return p + 4;
+  case 'f':
+    if (cima__load32(p + 1) != word4("alse")) return d->msg = "invalid literal", nullptr;
+    *v = (cima_json){.type = CIMA_JSON_BOOL, .b = false};
+    return p + 5;
+  case 'n':
+    if (cima__load32(p) != word4("null")) return d->msg = "invalid literal", nullptr;
+    *v = (cima_json){};
+    return p + 4;
+  default: break;
+  }
+  // integers of up to 19 digits, most numbers in practice, a digit a time with a branch each: like for strings,
+  // the branches predict the length and the loads after the number need not wait for it.
+  char *q = p + (*p == '-');
+  if (*q >= '1' && *q <= '9') {
+    uint64_t u = (uint64_t)(*q - '0');
+#define DOM_DIGIT(i)                                                                                             \
+  if ((unsigned)(q[i] - '0') < 10) {                                                                             \
+    u = u * 10 + (uint64_t)(q[i] - '0');                                                                         \
+  } else {                                                                                                       \
+    q += i;                                                                                                      \
+    goto integer;                                                                                                \
+  }
+    DOM_DIGIT(1) DOM_DIGIT(2) DOM_DIGIT(3) DOM_DIGIT(4) DOM_DIGIT(5) DOM_DIGIT(6) DOM_DIGIT(7) DOM_DIGIT(8)
+    DOM_DIGIT(9) DOM_DIGIT(10) DOM_DIGIT(11) DOM_DIGIT(12) DOM_DIGIT(13) DOM_DIGIT(14) DOM_DIGIT(15)
+    DOM_DIGIT(16) DOM_DIGIT(17) DOM_DIGIT(18)
+#undef DOM_DIGIT
+    goto general;
+  integer:
+    if (*q == '.') {
+      // a fraction after an integer part already read: its digits join the mantissa a word at a time, and only
+      // a number too long for that or with an exponent goes the general way.
+      const char *digits = q + 1, *r = digits;
+      uint64_t m = u;
+      int next = cima__digits8(&r, d->end, &m);
+      if (next >= 0 && r > digits && (next | 0x20) != 'e') {
+        cima__num n = {.mant = m, .exp10 = -(int32_t)(r - digits), .neg = *p == '-'};
+        double x = cima__num_double(&n, p, (size_t)(r - p));
+        *v = (cima_json){.type = CIMA_JSON_DOUBLE, .d = x};
+        return (char *)r;
+      }
+    }
+    // 19 digits stay below 2^64, past INT64_MAX they are a uint or for one value INT64_MIN.
+    if (*q != '.' && (*q | 0x20) != 'e') {
+      if (LIKELY(u <= INT64_MAX)) {
+        *v = (cima_json){.type = CIMA_JSON_INT, .i = *p == '-' ? -(int64_t)u : (int64_t)u};
+        return q;
+      }
+      if (*p != '-') {
+        *v = (cima_json){.type = CIMA_JSON_UINT, .u = u};
+        return q;
+      }
+    }
+  }
+general:;
+  cima__num n;
+  if (!(q = (char *)cima__scan_number(p, d->end, &n))) {
+    if (p >= d->end) return d->msg = "unexpected end of input", nullptr;
+    return d->msg = *p == '-' || (*p >= '0' && *p <= '9') ? "invalid number" : "unexpected character", nullptr;
+  }
+  uint64_t mag;
+  if (n.plain && cima__num_magnitude(&n, &mag) == CIMA__INT_OK) {
+    if (!n.neg) {
+      *v = mag <= INT64_MAX ? (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)mag}
+                            : (cima_json){.type = CIMA_JSON_UINT, .u = mag};
+      return q;
+    }
+    if (mag <= (uint64_t)INT64_MAX + 1) {
+      *v = (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)(0 - mag)};
+      return q;
+    }
+  }
+  double x = cima__num_double(&n, p, (size_t)(q - p));
+  if (!isfinite(x)) return d->msg = "number out of range", nullptr;
+  *v = (cima_json){.type = CIMA_JSON_DOUBLE, .d = x};
+  return q;
 }
 
 // parses one value from p into `root`. returns where it stopped, the error position when `d->msg` is set. the
 // stacks live in locals, so stores of children never make the compiler reload them.
-static char *dom_parse(dom *d, char *p, const char *end, cima_json *root) {
+static char *dom_parse(dom *d, char *p, cima_json *root) {
   dom_frame frames[DOM_MAX_DEPTH];
   uint32_t depth = 0;
-  bool object = false;
   dom_stack item_stack = {}, member_stack = {};
   cima_json *items = nullptr;
   cima_json_member *members = nullptr;
-  size_t items_len = 0, members_len = 0;
+  size_t items_len = 0, members_len = 0, base, n;
+  uint32_t indent = 0;
   cima_json v;
+  cima_json_member *m;
   char *q;
-value:
+
   p = dom_ws(p);
-  if (p >= end) return d->msg = "unexpected end of input", p;
-  switch (*p) {
-  case '{':
-    if (depth == DOM_MAX_DEPTH) return d->msg = "nested too deep", p;
-    p = dom_ws(p + 1);
-    if (p < end && *p == '}') {
-      p++;
-      v = (cima_json){.type = CIMA_JSON_OBJECT};
-      goto done;
-    }
-    frames[depth++] = (dom_frame){members_len, true};
-    object = true;
-    goto key;
-  case '[':
-    if (depth == DOM_MAX_DEPTH) return d->msg = "nested too deep", p;
-    p = dom_ws(p + 1);
-    if (p < end && *p == ']') {
-      p++;
-      v = (cima_json){.type = CIMA_JSON_ARRAY};
-      goto done;
-    }
-    frames[depth++] = (dom_frame){items_len, false};
-    object = false;
-    goto value;
-  case '"':
-    v = (cima_json){.type = CIMA_JSON_STRING};
-    if (!(q = dom_string(d, p, end, &v.str, &v.len, &v.flags))) return p;
-    p = q;
-    goto done;
-  case 't':
-    if (!literal(p, end, "true", 4)) return d->msg = "invalid literal", p;
-    v = (cima_json){.type = CIMA_JSON_BOOL, .b = true};
-    p += 4;
-    goto done;
-  case 'f':
-    if (!literal(p, end, "false", 5)) return d->msg = "invalid literal", p;
-    v = (cima_json){.type = CIMA_JSON_BOOL, .b = false};
-    p += 5;
-    goto done;
-  case 'n':
-    if (!literal(p, end, "null", 4)) return d->msg = "invalid literal", p;
-    v = (cima_json){};
-    p += 4;
-    goto done;
-  default: {
-    // small integers, most numbers in practice, without the general scan: up to 18 digits never overflow.
-    if (*p >= '1' && *p <= '9') {
-      uint64_t u = (uint64_t)(*p - '0');
-      q = p + 1;
-      const char *stop = end - q > 17 ? q + 17 : end;
-      while (q < stop && *q >= '0' && *q <= '9') u = u * 10 + (uint64_t)(*q++ - '0');
-      if (q == end || (*q != '.' && *q != 'e' && *q != 'E' && (*q < '0' || *q > '9'))) {
-        v = (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)u};
-        p = q;
-        goto done;
-      }
-    }
-    cima__num n;
-    if (!(q = (char *)cima__scan_number(p, end, &n))) {
-      bool numeric = *p == '-' || (*p >= '0' && *p <= '9');
-      return d->msg = numeric ? "invalid number" : "unexpected character", p;
-    }
-    uint64_t mag;
-    if (n.plain && cima__num_magnitude(&n, &mag) == CIMA__INT_OK) {
-      if (!n.neg) {
-        v = mag <= INT64_MAX ? (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)mag}
-                             : (cima_json){.type = CIMA_JSON_UINT, .u = mag};
-        p = q;
-        goto done;
-      }
-      if (mag <= (uint64_t)INT64_MAX + 1) {
-        v = (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)(0 - mag)};
-        p = q;
-        goto done;
-      }
-    }
-    double x = cima__num_double(&n, p, (size_t)(q - p));
-    if (!isfinite(x)) return d->msg = "number out of range", p;
-    v = (cima_json){.type = CIMA_JSON_DOUBLE, .d = x};
-    p = q;
-    goto done;
+  if (*p == '{') goto open_object;
+  if (*p == '[') goto open_array;
+  if (!(q = dom_scalar(d, p, root))) return p;
+  return q;
+
+open_array:
+  if (depth == DOM_MAX_DEPTH) return d->msg = "nested too deep", p;
+  q = dom_ws(p + 1);
+  if (*q == ']') {
+    p = q + 1;
+    v = (cima_json){.type = CIMA_JSON_ARRAY};
+    goto closed;
   }
-  }
-done:
-  if (!depth) {
-    *root = v;
-    return p;
-  }
-  if (object) {
-    members[members_len - 1].value = v;
+  frames[depth++] = (dom_frame){items_len, indent, false};
+  indent = cima__indent_of(p + 1, q);
+  p = q;
+  goto array_value;
+array_next_value:
+  if (LIKELY(cima__indent_is(p, indent))) {
+    p += indent;
   } else {
-    if (UNLIKELY(items_len == item_stack.cap)) {
-      item_stack = dom_grow(d->tmp, item_stack, sizeof *items, 256);
-      items = item_stack.items;
-    }
-    items[items_len++] = v;
+    q = dom_ws(p);
+    indent = cima__indent_of(p, q);
+    p = q;
   }
-  p = dom_ws(p);
-  if (p < end && *p == ',') {
+array_value:
+  if (*p == '{') goto open_object;
+  if (*p == '[') goto open_array;
+  if (UNLIKELY(items_len == item_stack.cap)) {
+    item_stack = dom_grow(d->tmp, item_stack, sizeof *items, 256);
+    items = item_stack.items;
+  }
+  if (!(q = dom_scalar(d, p, &items[items_len]))) return p;
+  items_len++;
+  p = q;
+array_next:
+  if (LIKELY(*p == ',')) {
     p++;
-    if (!object) goto value;
-    p = dom_ws(p);
-    goto key;
+    goto array_next_value;
   }
-  if (p >= end || *p != (object ? '}' : ']'))
-    return d->msg = object ? "expected ',' or '}'" : "expected ',' or ']'", p;
+  if (*p != ']') {
+    // the closing bracket of indented text sits where the container's own line starts, at its parent's guess.
+    uint32_t closing = frames[depth - 1].indent;
+    p = cima__indent_is(p, closing) ? p + closing : dom_ws(p);
+    if (*p == ',') {
+      p++;
+      goto array_next_value;
+    }
+    if (UNLIKELY(*p != ']')) return d->msg = "expected ',' or ']'", p;
+  }
   p++;
-  size_t base = frames[--depth].base;
-  if (object) {
-    size_t n = members_len - base;
-    if (n > UINT32_MAX) return d->msg = "object too long", p;
-    cima_json_member *m = cilo_arena_alloc(d->a, n * sizeof *m, alignof(cima_json_member));
-    memcpy(m, members + base, n * sizeof *m);
-    members_len = base;
-    v = (cima_json){.type = CIMA_JSON_OBJECT, .len = (uint32_t)n, .members = m};
-  } else {
-    size_t n = items_len - base;
-    if (n > UINT32_MAX) return d->msg = "array too long", p;
-    cima_json *copy = cilo_arena_alloc(d->a, n * sizeof *copy, alignof(cima_json));
-    memcpy(copy, items + base, n * sizeof *copy);
-    items_len = base;
-    v = (cima_json){.type = CIMA_JSON_ARRAY, .len = (uint32_t)n, .items = copy};
+  base = frames[--depth].base;
+  indent = frames[depth].indent;
+  n = items_len - base;
+  if (UNLIKELY(n > UINT32_MAX)) return d->msg = "array too long", p;
+  v = (cima_json){.type = CIMA_JSON_ARRAY, .len = (uint32_t)n,
+                  .items = dom_copy(d->a, items + base, n * sizeof *items)};
+  items_len = base;
+  goto closed;
+
+open_object:
+  if (depth == DOM_MAX_DEPTH) return d->msg = "nested too deep", p;
+  q = dom_ws(p + 1);
+  if (*q == '}') {
+    p = q + 1;
+    v = (cima_json){.type = CIMA_JSON_OBJECT};
+    goto closed;
   }
-  object = depth && frames[depth - 1].object;
-  goto done;
-key:
-  if (p >= end || *p != '"') return d->msg = "expected a key", p;
+  frames[depth++] = (dom_frame){members_len, indent, true};
+  indent = cima__indent_of(p + 1, q);
+  p = q;
+  goto object_key;
+object_next_key:
+  if (LIKELY(cima__indent_is(p, indent))) {
+    p += indent;
+  } else {
+    q = dom_ws(p);
+    indent = cima__indent_of(p, q);
+    p = q;
+  }
+object_key:
+  if (UNLIKELY(*p != '"')) return d->msg = "expected a key", p;
   if (UNLIKELY(members_len == member_stack.cap)) {
     member_stack = dom_grow(d->tmp, member_stack, sizeof *members, 128);
     members = member_stack.items;
   }
-  {
-    cima_json_member *m = &members[members_len];
-    *m = (cima_json_member){};
-    if (!(q = dom_string(d, p, end, &m->key, &m->key_len, &m->flags))) return p;
-    members_len++;
-    p = q;
+  m = &members[members_len];
+  if (!(q = dom_string(d, p, &m->key, &m->key_len, &m->flags))) return p;
+  members_len++;
+  p = q;
+  if (UNLIKELY(*p != ':')) {
+    p = dom_ws(p);
+    if (*p != ':') return d->msg = "expected ':'", p;
   }
+  p += 1 + (p[1] == ' ');
   p = dom_ws(p);
-  if (p >= end || *p != ':') return d->msg = "expected ':'", p;
+  if (*p == '{') goto open_object;
+  if (*p == '[') goto open_array;
+  if (!(q = dom_scalar(d, p, &m->value))) return p;
+  p = q;
+object_next:
+  if (LIKELY(*p == ',')) {
+    p++;
+    goto object_next_key;
+  }
+  if (*p != '}') {
+    uint32_t closing = frames[depth - 1].indent;
+    p = cima__indent_is(p, closing) ? p + closing : dom_ws(p);
+    if (*p == ',') {
+      p++;
+      goto object_next_key;
+    }
+    if (UNLIKELY(*p != '}')) return d->msg = "expected ',' or '}'", p;
+  }
   p++;
-  goto value;
+  base = frames[--depth].base;
+  indent = frames[depth].indent;
+  n = members_len - base;
+  if (UNLIKELY(n > UINT32_MAX)) return d->msg = "object too long", p;
+  v = (cima_json){.type = CIMA_JSON_OBJECT, .len = (uint32_t)n,
+                  .members = dom_copy(d->a, members + base, n * sizeof *members)};
+  members_len = base;
+
+closed:
+  if (!depth) {
+    *root = v;
+    return p;
+  }
+  if (frames[depth - 1].object) {
+    members[members_len - 1].value = v;
+    goto object_next;
+  }
+  if (UNLIKELY(items_len == item_stack.cap)) {
+    item_stack = dom_grow(d->tmp, item_stack, sizeof *items, 256);
+    items = item_stack.items;
+  }
+  items[items_len++] = v;
+  goto array_next;
 }
 
 static cima_json *node_in(cilo_arena *a, cima_json v) {
@@ -643,19 +956,18 @@ static cima_json *node_in(cilo_arena *a, cima_json v) {
 
 cima_json *cima_json_parse(cilo_arena *a, const char *text, size_t len, cima_json_error *err) {
   cilo_mark start = cilo_mark_of(a);
-  char *copy = cilo_arena_alloc(a, len + 1, 1);
+  char *copy = cilo_arena_alloc(a, len + CIMA__PAD, 16);
   if (len) memcpy(copy, text, len);
-  copy[len] = '\0';
-  const char *end = copy + len;
-  dom d = {.a = a};
+  memset(copy + len, 0, CIMA__PAD);
+  dom d = {.a = a, .end = copy + len};
   cima_json v;
   char *p = copy;
   CILO_SCRATCH(tmp, a) {
     d.tmp = tmp;
-    p = dom_parse(&d, copy, end, &v);
+    p = dom_parse(&d, copy, &v);
     if (!d.msg) {
-      p = (char *)cima__ws(p, end);
-      if (p != end) d.msg = "trailing characters";
+      p = dom_ws(p);
+      if (p != d.end) d.msg = "trailing characters";
     }
   }
   if (d.msg) {
@@ -869,6 +1181,8 @@ static void keep(cilo_arena *a, cima_json *v, bool deep) {
   case CIMA_JSON_RAW:
     if (v->type == CIMA_JSON_STRING && !(v->flags & CIMA_JSON__CLEAN) && clean_text(v->str, v->len))
       v->flags |= CIMA_JSON__CLEAN;
+    // the copy has nothing readable past its end.
+    v->flags &= (uint8_t)~CIMA_JSON__PADDED;
     v->str = copy_text(a, v->str, v->len);
     break;
   case CIMA_JSON_ARRAY: {

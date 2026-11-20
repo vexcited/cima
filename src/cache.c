@@ -122,6 +122,19 @@ static const cima__object_info *build_info(const cima_schema *s) {
     info->quoted_lens[i] = (uint32_t)w.len;
     cima_json_writer_dispose(&w);
   }
+  info->fast = must_malloc(count + 1);
+  info->fast_offsets = must_malloc(sizeof(uint32_t) * (count + 1));
+  for (size_t i = 0; i < count; i++) {
+    const cima_schema *f = cima__deref(s->fields[i].schema);
+    uint8_t optional = 0;
+    info->fast_offsets[i] = 0;
+    if (f->kind == CIMA_KIND_OPTIONAL && !f->common.default_json && !f->common.refinement) {
+      optional = CIMA__FAST_OPTIONAL;
+      info->fast_offsets[i] = (uint32_t)f->value_offset;
+      f = cima__deref(f->inner);
+    }
+    info->fast[i] = cima__plain_kind(f) ? (uint8_t)(f->kind | optional) : 0;
+  }
   if (count > 8) {
     uint32_t size = 16;
     while (size < count * 2) size <<= 1;
@@ -146,6 +159,8 @@ static void free_info(const cima__object_info *info) {
   free(info->quoted);
   free(info->quoted_lens);
   free(info->slots);
+  free(info->fast);
+  free(info->fast_offsets);
   free((void *)info);
 }
 

@@ -85,6 +85,10 @@ typedef struct cima_json_members {
 #define CIMA_JSON__GROW ((uint8_t)2)
 // a string or key needs no escaping.
 #define CIMA_JSON__CLEAN ((uint8_t)4)
+// a string or key is valid utf-8, it may still need escapes.
+#define CIMA_JSON__UTF8 ((uint8_t)8)
+// 32 bytes past the end of a string or key can be read, it lives in the text of a parse.
+#define CIMA_JSON__PADDED ((uint8_t)16)
 
 /* parsing. */
 

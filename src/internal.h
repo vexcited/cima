@@ -57,18 +57,28 @@ static inline uint32_t cima__load32(const char *p) {
   return v;
 }
 
-// short keys and strings compared and copied without a call: two overlapping words cover up to 16 bytes and
+// short keys and strings compared and copied without a call: two overlapping words or blocks cover them and
 // never touch a byte past `len`.
 static inline bool cima__same(const char *a, const char *b, size_t len) {
-  if (len > 16) return memcmp(a, b, len) == 0;
+  if (len > 32) return memcmp(a, b, len) == 0;
+  if (len > 16) {
+    uint64_t x = (cima__load64(a) ^ cima__load64(b)) | (cima__load64(a + 8) ^ cima__load64(b + 8));
+    x |= cima__load64(a + len - 16) ^ cima__load64(b + len - 16);
+    x |= cima__load64(a + len - 8) ^ cima__load64(b + len - 8);
+    return !x;
+  }
   if (len >= 8) return cima__load64(a) == cima__load64(b) && cima__load64(a + len - 8) == cima__load64(b + len - 8);
   if (len >= 4) return cima__load32(a) == cima__load32(b) && cima__load32(a + len - 4) == cima__load32(b + len - 4);
   return !len || (a[0] == b[0] && a[len / 2] == b[len / 2] && a[len - 1] == b[len - 1]);
 }
 
-static inline void cima__copy(char *dst, const char *src, size_t len) {
-  if (len > 16) {
+[[gnu::always_inline]] static inline void cima__copy(char *dst, const char *src, size_t len) {
+  if (len > 32) {
     memcpy(dst, src, len);
+  } else if (len > 16) {
+    // file names, urls and sentences: two overlapping blocks, still no call.
+    __builtin_memcpy_inline(dst, src, 16);
+    __builtin_memcpy_inline(dst + len - 16, src + len - 16, 16);
   } else if (len >= 8) {
     uint64_t head = cima__load64(src), tail = cima__load64(src + len - 8);
     memcpy(dst, &head, 8);
@@ -87,6 +97,17 @@ static inline void cima__copy(char *dst, const char *src, size_t len) {
 
 static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "the string scanners read words little endian");
 
+// vector paths per cpu, every one with a scalar twin that other cpus take and CIMA_NO_SIMD forces. code outside
+// this file sees 16 byte blocks as cima__v16 through the helpers below, which each cpu provides: neon on arm64
+// for now.
+#if defined(__ARM_NEON) && defined(__aarch64__) && !defined(CIMA_NO_SIMD)
+#include <arm_neon.h>
+#define CIMA__NEON 1
+#else
+#define CIMA__NEON 0
+#endif
+#define CIMA__SIMD CIMA__NEON
+
 constexpr uint64_t CIMA__ONES = 0x0101010101010101ull;
 constexpr uint64_t CIMA__HIGHS = 0x8080808080808080ull;
 
@@ -96,6 +117,133 @@ static inline uint64_t cima__special(uint64_t v) {
   uint64_t q = v ^ (CIMA__ONES * '"');
   uint64_t b = v ^ (CIMA__ONES * '\\');
   return ((q - CIMA__ONES) & ~q) | ((b - CIMA__ONES) & ~b) | ((v - CIMA__ONES * 0x20) & ~v) | v;
+}
+
+#if CIMA__NEON
+typedef uint8x16_t cima__v16;
+
+static inline cima__v16 cima__load16(const char *p) { return vld1q_u8((const uint8_t *)p); }
+static inline void cima__store16(char *p, cima__v16 v) { vst1q_u8((uint8_t *)p, v); }
+static inline bool cima__any16(cima__v16 v) { return vmaxvq_u8(v) != 0; }
+
+// the first k bytes of v at p, k below 16, and nothing past them. returns p + k.
+static inline char *cima__store_first16(char *p, cima__v16 v, unsigned k) {
+  if (k & 8) {
+    vst1_u8((uint8_t *)p, vget_low_u8(v));
+    v = vextq_u8(v, v, 8);
+    p += 8;
+  }
+  uint64_t x = vgetq_lane_u64(vreinterpretq_u64_u8(v), 0);
+  if (k & 4) {
+    uint32_t y = (uint32_t)x;
+    memcpy(p, &y, 4);
+    x >>= 32;
+    p += 4;
+  }
+  if (k & 2) {
+    uint16_t y = (uint16_t)x;
+    memcpy(p, &y, 2);
+    x >>= 16;
+    p += 2;
+  }
+  if (k & 1) *p++ = (char)x;
+  return p;
+}
+
+// the masks below hold a nibble a lane, the first lane lowest: cima__lane gives the first one set.
+static inline uint64_t cima__nibbles(uint8x16_t m) {
+  return vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(m), 4)), 0);
+}
+
+static inline unsigned cima__lane(uint64_t mask) { return (unsigned)__builtin_ctzll(mask) >> 2; }
+
+// cima__special of 16 bytes, exact on every lane: a signed compare takes control characters and bytes past ascii
+// at once.
+static inline uint64_t cima__special16(cima__v16 v) {
+  uint8x16_t m = vorrq_u8(vceqq_u8(v, vdupq_n_u8('"')), vceqq_u8(v, vdupq_n_u8('\\')));
+  return cima__nibbles(vorrq_u8(m, vcltq_s8(vreinterpretq_s8_u8(v), vdupq_n_s8(0x20))));
+}
+
+// what ends a run of text that utf-8 checks can go through: quotes, backslashes and control characters.
+static inline uint64_t cima__stops16(cima__v16 v) {
+  uint8x16_t m = vorrq_u8(vceqq_u8(v, vdupq_n_u8('"')), vceqq_u8(v, vdupq_n_u8('\\')));
+  return cima__nibbles(vorrq_u8(m, vcltq_u8(v, vdupq_n_u8(0x20))));
+}
+
+// the first k bytes of v, the others zero.
+static inline cima__v16 cima__first16(cima__v16 v, unsigned k) {
+  static const uint8_t iota[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+  return vandq_u8(v, vcgtq_u8(vdupq_n_u8((uint8_t)k), vld1q_u8(iota)));
+}
+
+// utf-8 checked 16 bytes at a time, after keiser and lemire: three lookups classify every byte with the one
+// before it, and the bytes two and three back tell which continuations a lead asks for. bytes before the first
+// block count as ascii.
+typedef struct cima__utf8 {
+  cima__v16 prev, error, incomplete;
+} cima__utf8;
+
+[[gnu::always_inline]] static inline void cima__utf8_next(cima__utf8 *s, cima__v16 in) {
+  if (vmaxvq_u8(in) < 0x80) {
+    s->error = vorrq_u8(s->error, s->incomplete);
+    s->incomplete = vdupq_n_u8(0);
+    s->prev = in;
+    return;
+  }
+  enum : uint8_t {
+    TOO_SHORT = 1, TOO_LONG = 2, OVERLONG_3 = 4, TOO_LARGE = 8, SURROGATE = 16, OVERLONG_2 = 32,
+    TOO_LARGE_1000 = 64, OVERLONG_4 = 64, TWO_CONTS = 128, CARRY = TOO_SHORT | TOO_LONG | TWO_CONTS,
+  };
+  static const uint8_t high1[16] = {
+    TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG,
+    TWO_CONTS, TWO_CONTS, TWO_CONTS, TWO_CONTS,
+    TOO_SHORT | OVERLONG_2, TOO_SHORT, TOO_SHORT | OVERLONG_3 | SURROGATE,
+    TOO_SHORT | TOO_LARGE | TOO_LARGE_1000 | OVERLONG_4,
+  };
+  static const uint8_t low1[16] = {
+    CARRY | OVERLONG_3 | OVERLONG_2 | OVERLONG_4, CARRY | OVERLONG_2, CARRY, CARRY,
+    CARRY | TOO_LARGE, CARRY | TOO_LARGE | TOO_LARGE_1000, CARRY | TOO_LARGE | TOO_LARGE_1000,
+    CARRY | TOO_LARGE | TOO_LARGE_1000, CARRY | TOO_LARGE | TOO_LARGE_1000, CARRY | TOO_LARGE | TOO_LARGE_1000,
+    CARRY | TOO_LARGE | TOO_LARGE_1000, CARRY | TOO_LARGE | TOO_LARGE_1000, CARRY | TOO_LARGE | TOO_LARGE_1000,
+    CARRY | TOO_LARGE | TOO_LARGE_1000 | SURROGATE, CARRY | TOO_LARGE | TOO_LARGE_1000,
+    CARRY | TOO_LARGE | TOO_LARGE_1000,
+  };
+  static const uint8_t high2[16] = {
+    TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+    TOO_LONG | OVERLONG_2 | TWO_CONTS | OVERLONG_3 | TOO_LARGE_1000 | OVERLONG_4,
+    TOO_LONG | OVERLONG_2 | TWO_CONTS | OVERLONG_3 | TOO_LARGE,
+    TOO_LONG | OVERLONG_2 | TWO_CONTS | SURROGATE | TOO_LARGE,
+    TOO_LONG | OVERLONG_2 | TWO_CONTS | SURROGATE | TOO_LARGE,
+    TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+  };
+  static const uint8_t last[16] = {
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0xf0 - 1, 0xe0 - 1, 0xc0 - 1,
+  };
+  uint8x16_t prev1 = vextq_u8(s->prev, in, 15);
+  uint8x16_t special = vandq_u8(vandq_u8(vqtbl1q_u8(vld1q_u8(high1), vshrq_n_u8(prev1, 4)),
+                                         vqtbl1q_u8(vld1q_u8(low1), vandq_u8(prev1, vdupq_n_u8(0x0f)))),
+                                vqtbl1q_u8(vld1q_u8(high2), vshrq_n_u8(in, 4)));
+  // the second byte after a lead of three or four, and the third after a lead of four.
+  uint8x16_t third = vqsubq_u8(vextq_u8(s->prev, in, 14), vdupq_n_u8(0xe0 - 0x80));
+  uint8x16_t fourth = vqsubq_u8(vextq_u8(s->prev, in, 13), vdupq_n_u8(0xf0 - 0x80));
+  uint8x16_t must = vandq_u8(vorrq_u8(third, fourth), vdupq_n_u8(0x80));
+  s->error = vorrq_u8(s->error, veorq_u8(must, special));
+  s->incomplete = vqsubq_u8(in, vld1q_u8(last));
+  s->prev = in;
+}
+
+static inline bool cima__utf8_bad(const cima__utf8 *s) { return cima__any16(vorrq_u8(s->error, s->incomplete)); }
+#endif
+
+// the first byte from p on that a string does not hold as it is, in text padded with nul bytes. for runs past
+// their first bytes, which short strings settle with a branch a byte. words beat neon blocks here on an m4: most
+// runs end within a few words, and a vector mask takes longer to reach a branch.
+static inline const char *cima__special_run(const char *p) {
+  for (;;) {
+    uint64_t m = cima__special(cima__load64(p)) & CIMA__HIGHS;
+    if (m) return p + (__builtin_ctzll(m) >> 3);
+    p += 8;
+  }
 }
 
 static inline int cima__hex(unsigned char c) {
@@ -220,6 +368,65 @@ typedef struct cima__num {
 
 static inline bool cima__digit(const char *p, const char *end) { return p < end && *p >= '0' && *p <= '9'; }
 
+// the count of leading digits in eight bytes and their value. a byte past ascii or below '0' borrows only into
+// the bytes after it, so the first flagged byte is exact.
+static inline uint32_t cima__lead_digits(uint64_t v, uint32_t *value) {
+  uint64_t bad = ((v + CIMA__ONES * 0x46) | (v - CIMA__ONES * '0')) & CIMA__HIGHS;
+  uint32_t k = bad ? (uint32_t)__builtin_ctzll(bad) >> 3 : 8;
+  // the digits move to the top bytes, zeros before them read as leading zeros.
+  v = k ? (v & CIMA__ONES * 0x0f) << (64 - 8 * k) : 0;
+  v = v * 10 + (v >> 8);
+  uint64_t lanes = 0x000000ff000000ffull;
+  v = ((v & lanes) * (100 + (1000000ull << 32)) + ((v >> 16) & lanes) * (1 + (10000ull << 32))) >> 32;
+  *value = (uint32_t)v;
+  return k;
+}
+
+static const uint32_t cima__pow10_u32[9] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000};
+
+// adds the digits at *pp to m a word at a time, while that cannot overflow and the words end before `end`.
+// returns the byte after them when it was in the last word read, saving a load, otherwise -1 and the caller goes
+// on a digit at a time.
+static inline int cima__digits8(const char **pp, const char *end, uint64_t *m) {
+  const char *p = *pp;
+  int next = -1;
+  // two words at once first: a fraction of up to sixteen digits then needs no load that waits on another. 1843 is
+  // (2^64 - 1 - (10^16 - 1)) / 10^16.
+  if (end - p >= 16 && *m <= 1843) {
+    uint64_t v = cima__load64(p), w = cima__load64(p + 8);
+    uint32_t a, b, ka = cima__lead_digits(v, &a), kb = cima__lead_digits(w, &b);
+    if (ka < 8) {
+      *m = *m * cima__pow10_u32[ka] + a;
+      *pp = p + ka;
+      return (uint8_t)(v >> 8 * ka);
+    }
+    *m = (*m * 100000000 + a) * cima__pow10_u32[kb] + b;
+    p += 8 + kb;
+    if (kb < 8) {
+      *pp = p;
+      return (uint8_t)(w >> 8 * kb);
+    }
+  }
+  // (2^64 - 1 - 99999999) / 10^8.
+  while (end - p >= 8 && *m <= 184467440736ull) {
+    uint64_t v = cima__load64(p);
+    uint32_t value, k = cima__lead_digits(v, &value);
+    *m = *m * cima__pow10_u32[k] + value;
+    p += k;
+    if (k < 8) {
+      next = (uint8_t)(v >> 8 * k);
+      break;
+    }
+  }
+  *pp = p;
+  return next;
+}
+
+// m * 10 + d fits in 64 bits.
+static inline bool cima__fits(uint64_t m, unsigned d) {
+  return m < 1844674407370955161ull || (m == 1844674407370955161ull && d <= 5);
+}
+
 // scans a json number at p, returns its end or null.
 static inline const char *cima__scan_number(const char *p, const char *end, cima__num *n) {
   uint64_t m = 0;
@@ -230,46 +437,56 @@ static inline const char *cima__scan_number(const char *p, const char *end, cima
     p++;
   }
   if (p >= end) return nullptr;
+  // the byte after what was read, -1 past the end.
+  int c;
   if (*p == '0') {
     p++;
+    c = p < end ? (uint8_t)*p : -1;
   } else if (*p >= '1' && *p <= '9') {
-    // up to 19 digits never overflow, the common case pays no check.
-    const char *fast = end - p > 19 ? p + 19 : end;
-    while (p < fast && *p >= '0' && *p <= '9') m = m * 10 + (uint64_t)(*p++ - '0');
-    while (cima__digit(p, end)) {
-      unsigned d = (unsigned)(*p++ - '0');
-      uint64_t t;
-      if (!full && !ckd_mul(&t, m, 10) && !ckd_add(&t, t, d)) {
-        m = t;
-        continue;
+    c = cima__digits8(&p, end, &m);
+    if (c < 0) {
+      for (; cima__digit(p, end); p++) {
+        unsigned d = (unsigned)(*p - '0');
+        if (!full && cima__fits(m, d)) {
+          m = m * 10 + d;
+          continue;
+        }
+        full = true;
+        drop++;
+        inexact |= d != 0;
       }
-      full = true;
-      drop++;
-      inexact |= d != 0;
+      c = p < end ? (uint8_t)*p : -1;
     }
   } else {
     return nullptr;
   }
-  if (p < end && *p == '.') {
+  if (c == '.') {
     plain = false;
-    p++;
-    if (!cima__digit(p, end)) return nullptr;
-    while (cima__digit(p, end)) {
-      unsigned d = (unsigned)(*p++ - '0');
-      if (!full) {
-        uint64_t t;
-        if (!ckd_mul(&t, m, 10) && !ckd_add(&t, t, d)) {
-          m = t;
-          frac++;
-          continue;
-        }
-        full = true;
-      }
-      inexact |= d != 0;
+    const char *digits = ++p;
+    c = -1;
+    if (!full) {
+      c = cima__digits8(&p, end, &m);
+      frac += (int32_t)(p - digits);
     }
+    if (c < 0) {
+      for (; cima__digit(p, end); p++) {
+        unsigned d = (unsigned)(*p - '0');
+        if (!full) {
+          if (cima__fits(m, d)) {
+            m = m * 10 + d;
+            frac++;
+            continue;
+          }
+          full = true;
+        }
+        inexact |= d != 0;
+      }
+      c = p < end ? (uint8_t)*p : -1;
+    }
+    if (p == digits) return nullptr;
   }
   int64_t e = 0;
-  if (p < end && (*p == 'e' || *p == 'E')) {
+  if ((c | 0x20) == 'e') {
     plain = false;
     p++;
     bool eneg = false;
@@ -295,6 +512,11 @@ typedef struct cima__lex_error {
 
 // skips one value, checking its syntax, and returns what follows it or null with `err` set.
 const char *cima__skip(const char *p, const char *end, uint32_t depth, cima__lex_error *err);
+// the same over padded text, see CIMA__PAD.
+const char *cima__pad_skip(const char *p, const char *end, uint32_t depth, cima__lex_error *err);
+// cima__scan_string_rest over padded text: from p, past the plain start of the string at `body`.
+const char *cima__pad_string_rest(const char *body, const char *p, const char *end, cima__str *out,
+                                  const char **err);
 
 typedef enum cima__int_status : uint8_t { CIMA__INT_OK, CIMA__INT_FRACTION, CIMA__INT_RANGE } cima__int_status;
 
@@ -306,6 +528,63 @@ double cima__num_double(const cima__num *n, const char *tok, size_t len);
 size_t cima__fmt_u64(char *out, uint64_t v);
 // the shortest text reading back as `v`, at most 32 bytes. `v` is finite.
 size_t cima__fmt_double(char *out, double v);
+
+/* ========================================================================================================== */
+/* lexing text followed by nuls, CIMA__PAD of them: scans read whole words past the end without checks, a nul  */
+/* is never valid where one stops. both parsers work on such a copy.                                          */
+/* ========================================================================================================== */
+
+constexpr size_t CIMA__PAD = 64;
+
+// bytes a string holds as they are: printable ascii but the quote and the backslash.
+static const bool cima__plain[256] = {
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+// whitespace. indented text puts a newline and a run of spaces between tokens: the spaces go a word at a time,
+// and branches on them predict well since the depth of a document changes slowly.
+[[gnu::always_inline]] static inline const char *cima__pad_ws(const char *p) {
+  for (;;) {
+    unsigned char c = (unsigned char)*p;
+    if (LIKELY(c > ' ')) return p;
+    if (c == ' ') {
+      uint64_t x = cima__load64(p) ^ (CIMA__ONES * ' ');
+      if (!x) {
+        p += 8;
+        continue;
+      }
+      p += (unsigned)__builtin_ctzll(x) >> 3;
+      continue;
+    }
+    if (c != '\n' && c != '\r' && c != '\t') return p;
+    p++;
+  }
+}
+
+// whether the whitespace before the next child is `n` bytes, a newline and spaces or nothing, as before the
+// last one. pretty printers indent every child of a container alike, so this guess holds and p moves on by a
+// number known in advance: only the checks wait for the loads, and their branches predict.
+[[gnu::always_inline]] static inline bool cima__indent_is(const char *p, uint32_t n) {
+  if ((unsigned char)p[n] <= ' ') return false;
+  if (!n) return true;
+  if (p[0] != '\n') return false;
+  const char *s = p + 1;
+  uint64_t bad = 0;
+  uint32_t k = n - 1;
+  for (; k >= 8; k -= 8, s += 8) bad |= cima__load64(s) ^ (CIMA__ONES * ' ');
+  if (k) bad |= (cima__load64(s) ^ (CIMA__ONES * ' ')) & ((1ull << (8 * k)) - 1);
+  return !bad;
+}
+
+// the indentation guess from the whitespace between p and q.
+static inline uint32_t cima__indent_of(const char *p, const char *q) { return q - p <= 33 ? (uint32_t)(q - p) : 0; }
 
 /* ========================================================================================================== */
 /* writer internals.                                                                                          */
@@ -365,7 +644,36 @@ typedef struct cima__object_info {
   // field index + 1 by key hash, for objects past a few fields.
   uint32_t *slots;
   uint32_t mask;
+  // the kind of each field that parses with no check, default or refinement, CIMA__FAST_OPTIONAL added when it
+  // sits in an optional at `fast_offsets`, zero for the others.
+  uint8_t *fast;
+  uint32_t *fast_offsets;
 } cima__object_info;
+
+constexpr uint8_t CIMA__FAST_OPTIONAL = 0x80;
+
+// a kind the parsers read in place: no check, no default and no refinement.
+static inline bool cima__plain_kind(const cima_schema *f) {
+  if (f->common.default_json || f->common.refinement) return false;
+  switch (f->kind) {
+  case CIMA_KIND_BOOL: return true;
+  case CIMA_KIND_I8:
+  case CIMA_KIND_I16:
+  case CIMA_KIND_I32:
+  case CIMA_KIND_I64:
+  case CIMA_KIND_U8:
+  case CIMA_KIND_U16:
+  case CIMA_KIND_U32:
+  case CIMA_KIND_U64: return !f->integer.has_min && !f->integer.has_max && !f->integer.multiple_of;
+  case CIMA_KIND_NUMBER: return !f->number.has_min && !f->number.has_max && !f->number.multiple_of;
+  case CIMA_KIND_STRING: {
+    const cima_string_opts *o = &f->string;
+    return !o->has_min && !o->has_max && !o->format && !o->pattern && !o->starts_with && !o->ends_with && !o->trim &&
+           !o->lowercase;
+  }
+  default: return false;
+  }
+}
 
 const cima__object_info *cima__object_info_of(const cima_schema *object);
 // index of the field named `key` or -1. `hint` is the expected index, keys usually come in declaration order.

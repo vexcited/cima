@@ -35,7 +35,22 @@ struct cima_ctx {
   size_t nframes, frames_cap;
   raw_issue *issues;
   size_t nissues, issues_cap;
+  // the object infos met last, by schema: a parse goes through few shapes many times, and the shared cache
+  // costs a hash and a lock free lookup each.
+  struct {
+    const cima_schema *schema;
+    const cima__object_info *info;
+  } infos[8];
 };
+
+static const cima__object_info *info_of(cima_ctx *c, const cima_schema *s) {
+  size_t slot = ((uintptr_t)s >> 4) & 7;
+  if (LIKELY(c->infos[slot].schema == s)) return c->infos[slot].info;
+  const cima__object_info *info = cima__object_info_of(s);
+  c->infos[slot].schema = s;
+  c->infos[slot].info = info;
+  return info;
+}
 
 static void push_frame(cima_ctx *c, frame f) {
   if (UNLIKELY(c->nframes == c->frames_cap)) {
@@ -334,6 +349,8 @@ static void int_limits(cima_kind k, uint64_t *neg, uint64_t *pos) {
   }
 }
 
+static void store_int(cima_ctx *c, const cima_schema *s, bool neg, uint64_t mag, bool range, void *dst);
+
 static void store_number(cima_ctx *c, const cima_schema *s, const cima__num *n, const char *tok, size_t len,
                          void *dst) {
   if (s->kind == CIMA_KIND_NUMBER) {
@@ -346,22 +363,28 @@ static void store_number(cima_ctx *c, const cima_schema *s, const cima__num *n, 
     check_number(c, s, d);
     return;
   }
-  uint64_t mag, neg_max, pos_max;
-  int_limits(s->kind, &neg_max, &pos_max);
+  uint64_t mag;
   cima__int_status st = cima__num_magnitude(n, &mag);
   if (st == CIMA__INT_FRACTION) {
     report(c, CIMA_ISSUE_INVALID_TYPE, "expected an integer, got a fraction");
     return;
   }
-  if (n->neg && (st == CIMA__INT_RANGE || mag > neg_max)) {
+  store_int(c, s, n->neg, mag, st == CIMA__INT_RANGE, dst);
+}
+
+// an integer of magnitude `mag` into a c integer of the schema's kind, `range` when it went past 64 bits.
+static void store_int(cima_ctx *c, const cima_schema *s, bool neg, uint64_t mag, bool range, void *dst) {
+  uint64_t neg_max, pos_max;
+  int_limits(s->kind, &neg_max, &pos_max);
+  if (neg && (range || mag > neg_max)) {
     reportf(c, CIMA_ISSUE_TOO_SMALL, "must be at least %s%llu", neg_max ? "-" : "", (unsigned long long)neg_max);
     return;
   }
-  if (!n->neg && (st == CIMA__INT_RANGE || mag > pos_max)) {
+  if (!neg && (range || mag > pos_max)) {
     reportf(c, CIMA_ISSUE_TOO_BIG, "must be at most %llu", (unsigned long long)pos_max);
     return;
   }
-  int64_t i = n->neg ? (int64_t)(0 - mag) : (int64_t)mag;
+  int64_t i = neg ? (int64_t)(0 - mag) : (int64_t)mag;
   switch (s->kind) {
   case CIMA_KIND_I8: *(int8_t *)dst = (int8_t)i; break;
   case CIMA_KIND_I16: *(int16_t *)dst = (int16_t)i; break;
@@ -372,7 +395,7 @@ static void store_number(cima_ctx *c, const cima_schema *s, const cima__num *n, 
   case CIMA_KIND_U64: *(uint64_t *)dst = mag; break;
   default: *(int64_t *)dst = i; break;
   }
-  check_int(c, s, !n->neg && mag > INT64_MAX, i, mag);
+  check_int(c, s, !neg && mag > INT64_MAX, i, mag);
 }
 
 // lists gather in the scratch arena, then take an exact block from the output allocator. the item being parsed
@@ -443,9 +466,122 @@ static const char *got(char ch) {
   }
 }
 
+// the first byte at q that a string does not hold as it is, in padded text: a byte at a time for the first 16
+// with a branch each, which predicts the length of short strings, then words.
+[[gnu::always_inline]] static inline const char *plain_run(const char *q) {
+#define STEP(i)                                                                                                  \
+  if (!cima__plain[(unsigned char)q[i]]) return q + i;
+  STEP(0) STEP(1) STEP(2) STEP(3) STEP(4) STEP(5) STEP(6) STEP(7)
+  STEP(8) STEP(9) STEP(10) STEP(11) STEP(12) STEP(13) STEP(14) STEP(15)
+#undef STEP
+  return cima__special_run(q + 16);
+}
+
+// the first byte that is not a digit from p on, in padded text: eight at a time, the lowest flag of a word being
+// exact.
+static inline const char *pad_digits(const char *p) {
+  for (;;) {
+    uint64_t v = cima__load64(p);
+    uint64_t bad = ((v + CIMA__ONES * 0x46) | (v - CIMA__ONES * '0')) & CIMA__HIGHS;
+    if (bad) return p + (__builtin_ctzll(bad) >> 3);
+    p += 8;
+  }
+}
+
+// the end of the number at p in padded text, or null when it is none: its syntax alone, as cima__scan_number
+// checks it, with no value to compute.
+static inline const char *pad_number(const char *p) {
+  p += *p == '-';
+  if (*p == '0') p++;
+  else if (*p >= '1' && *p <= '9') p = pad_digits(p + 1);
+  else return nullptr;
+  if (*p == '.') {
+    if ((unsigned)(p[1] - '0') >= 10) return nullptr;
+    p = pad_digits(p + 2);
+  }
+  if ((*p | 0x20) == 'e') {
+    p += 1 + (p[1] == '+' || p[1] == '-');
+    if ((unsigned)(*p - '0') >= 10) return nullptr;
+    p = pad_digits(p + 1);
+  }
+  return p;
+}
+
+// a string, number or literal of padded text at p, for cima__pad_skip.
+[[gnu::always_inline]] static inline const char *pad_scalar(const char *p, const char *end, cima__lex_error *err) {
+  switch (*p) {
+  case '"': {
+    const char *q = plain_run(p + 1);
+    if (LIKELY(*q == '"')) return q + 1;
+    cima__str s;
+    if (!(q = cima__pad_string_rest(p + 1, q, end, &s, &err->msg))) err->at = p;
+    return q;
+  }
+  case 't':
+    if (cima__load32(p) == cima__load32("true")) return p + 4;
+    return err->at = p, err->msg = "invalid literal", nullptr;
+  case 'f':
+    if (cima__load32(p + 1) == cima__load32("alse")) return p + 5;
+    return err->at = p, err->msg = "invalid literal", nullptr;
+  case 'n':
+    if (cima__load32(p) == cima__load32("null")) return p + 4;
+    return err->at = p, err->msg = "invalid literal", nullptr;
+  default: {
+    if (p >= end) return err->at = p, err->msg = "unexpected end of input", nullptr;
+    const char *q = pad_number(p);
+    if (!q) err->at = p, err->msg = *p == '-' || (*p >= '0' && *p <= '9') ? "invalid number" : "unexpected character";
+    return q;
+  }
+  }
+}
+
+// cima__skip over padded text: the same checks and messages, with the scans that need no bounds. only
+// containers with something in them cost a call.
+const char *cima__pad_skip(const char *p, const char *end, uint32_t depth, cima__lex_error *err) {
+  p = cima__pad_ws(p);
+  if (*p != '{' && *p != '[') return pad_scalar(p, end, err);
+  char close = *p == '{' ? '}' : ']';
+  bool object = *p == '{';
+  if (!depth) return err->at = p, err->msg = "nested too deep", nullptr;
+  const char *start = p + 1;
+  p = cima__pad_ws(start);
+  uint32_t indent = cima__indent_of(start, p);
+  if (*p == close) return p + 1;
+  for (;;) {
+    if (object) {
+      if (*p != '"') return err->at = p, err->msg = "expected a key", nullptr;
+      const char *q = pad_scalar(p, end, err);
+      if (!q) return nullptr;
+      p = *q == ':' ? q : cima__pad_ws(q);
+      if (*p != ':') return err->at = p, err->msg = "expected ':'", nullptr;
+      p++;
+      p += *p == ' ';
+      if ((unsigned char)*p <= ' ') p = cima__pad_ws(p);
+    }
+    // the bracket that closes is two past the one that opens, in ascii.
+    if (*p == '{' || *p == '[') p = p[1] == *p + 2 ? p + 2 : cima__pad_skip(p, end, depth - 1, err);
+    else p = pad_scalar(cima__pad_ws(p), end, err);
+    if (!p) return nullptr;
+    if (*p != ',' && *p != close) p = cima__pad_ws(p);
+    if (*p == ',') {
+      p++;
+      if (LIKELY(cima__indent_is(p, indent))) {
+        p += indent;
+      } else {
+        const char *q = cima__pad_ws(p);
+        indent = cima__indent_of(p, q);
+        p = q;
+      }
+      continue;
+    }
+    if (*p == close) return p + 1;
+    return err->at = p, err->msg = object ? "expected ',' or '}'" : "expected ',' or ']'", nullptr;
+  }
+}
+
 static void skip_value(cima_ctx *c) {
   cima__lex_error err;
-  const char *q = cima__skip(c->p, c->end, c->max_depth > c->depth ? c->max_depth - c->depth : 0, &err);
+  const char *q = cima__pad_skip(c->p, c->end, c->max_depth > c->depth ? c->max_depth - c->depth : 0, &err);
   if (!q) {
     syntax(c, err.at, err.msg);
     return;
@@ -467,6 +603,20 @@ static bool scan_str(cima_ctx *c, cima__str *s) {
   }
   c->p = q;
   return true;
+}
+
+// a string whose opening quote is at p, in the padded text, with the bounded scan for escapes, utf-8 and
+// errors. returns what follows it, or null after a syntax issue.
+[[gnu::always_inline]] static inline const char *fast_str(cima_ctx *c, const char *p, cima__str *s) {
+  const char *body = p + 1, *q = plain_run(body);
+  if (LIKELY(*q == '"')) {
+    *s = (cima__str){body, (size_t)(q - body), false};
+    return q + 1;
+  }
+  const char *err;
+  const char *r = cima__pad_string_rest(body, q, c->end, s, &err);
+  if (!r) syntax(c, p, err);
+  return r;
 }
 
 // the decoded text of a scanned string, in scratch when it had escapes.
@@ -493,33 +643,115 @@ static void parse_value(cima_ctx *c, const cima_schema *s, void *out);
 static void from_text(cima_ctx *c, const cima_schema *s, const char *t, size_t len, void *out);
 static void text_value(cima_ctx *c, const cima_schema *s, const char *t, size_t len, void *out);
 
+// a plain field read in place, see cima__object_info. returns what follows it, or null to leave anything out of
+// the ordinary, escapes, type mismatches and numbers out of range included, to parse_value, with no issue
+// reported here.
+[[gnu::always_inline]] static inline const char *fast_field(cima_ctx *c, uint8_t kind, const char *p, void *dst) {
+  switch (kind) {
+  case CIMA_KIND_STRING: {
+    if (*p != '"') return nullptr;
+    const char *body = p + 1, *q = plain_run(body);
+    if (*q != '"') return nullptr;
+    size_t len = (size_t)(q - body);
+    char *buf = cilo_alloc(c->out, len + 1, 1);
+    cima__copy(buf, body, len);
+    buf[len] = '\0';
+    *(const char **)dst = buf;
+    return q + 1;
+  }
+  case CIMA_KIND_BOOL:
+    if (cima__load32(p) == cima__load32("true")) {
+      *(bool *)dst = true;
+      return p + 4;
+    }
+    if (cima__load32(p + 1) == cima__load32("alse") && *p == 'f') {
+      *(bool *)dst = false;
+      return p + 5;
+    }
+    return nullptr;
+  case CIMA_KIND_NUMBER: {
+    if (*p != '-' && (unsigned)(*p - '0') >= 10) return nullptr;
+    cima__num n;
+    const char *q = cima__scan_number(p, c->end, &n);
+    if (!q) return nullptr;
+    double d = cima__num_double(&n, p, (size_t)(q - p));
+    if (!isfinite(d)) return nullptr;
+    *(double *)dst = d;
+    return q;
+  }
+  default: {
+    bool neg = *p == '-';
+    const char *q = p + neg;
+    if (*q < '1' || *q > '9') return nullptr;
+    uint64_t u = (uint64_t)(*q++ - '0');
+    for (int i = 0; i < 17 && (unsigned)(*q - '0') < 10; i++) u = u * 10 + (uint64_t)(*q++ - '0');
+    if ((unsigned)(*q - '0') < 10 || *q == '.' || (*q | 0x20) == 'e') return nullptr;
+    uint64_t neg_max, pos_max;
+    int_limits((cima_kind)kind, &neg_max, &pos_max);
+    if (u > (neg ? neg_max : pos_max)) return nullptr;
+    int64_t i = neg ? -(int64_t)u : (int64_t)u;
+    switch (kind) {
+    case CIMA_KIND_I8: *(int8_t *)dst = (int8_t)i; break;
+    case CIMA_KIND_I16: *(int16_t *)dst = (int16_t)i; break;
+    case CIMA_KIND_I32: *(int32_t *)dst = (int32_t)i; break;
+    case CIMA_KIND_U8: *(uint8_t *)dst = (uint8_t)u; break;
+    case CIMA_KIND_U16: *(uint16_t *)dst = (uint16_t)u; break;
+    case CIMA_KIND_U32: *(uint32_t *)dst = (uint32_t)u; break;
+    case CIMA_KIND_U64: *(uint64_t *)dst = u; break;
+    default: *(int64_t *)dst = i; break;
+    }
+    return q;
+  }
+  }
+}
+
+// the whitespace before the next child of a container, guessed from the one before the last: see
+// cima__indent_is.
+[[gnu::always_inline]] static inline const char *next_child(const char *p, uint32_t *indent) {
+  if (LIKELY(cima__indent_is(p, *indent))) return p + *indent;
+  const char *q = cima__pad_ws(p);
+  *indent = cima__indent_of(p, q);
+  return q;
+}
+
 static void parse_array(cima_ctx *c, const cima_schema *s, void *out) {
   if (!enter(c)) return;
   const cima_schema *item = s->inner;
   list_builder b = {.size = item->size, .align = item->align};
-  c->p = cima__ws(c->p + 1, c->end);
-  if (c->p < c->end && *c->p == ']') {
-    c->p++;
+  const char *p = cima__pad_ws(c->p + 1);
+  uint32_t indent = cima__indent_of(c->p + 1, p);
+  const cima_schema *plain = cima__deref(item);
+  uint8_t fast = cima__plain_kind(plain) ? (uint8_t)plain->kind : 0;
+  if (*p == ']') {
+    p++;
   } else {
     for (;;) {
       void *slot = list_next(c, &b);
-      push_index(c, b.len - 1);
-      parse_value(c, item, slot);
-      pop(c);
-      if (c->stop) break;
-      c->p = cima__ws(c->p, c->end);
-      if (c->p < c->end && *c->p == ',') {
-        c->p++;
+      const char *q = fast ? fast_field(c, fast, p, slot) : nullptr;
+      if (q) {
+        p = q;
+      } else {
+        push_index(c, b.len - 1);
+        c->p = p;
+        parse_value(c, item, slot);
+        p = c->p;
+        pop(c);
+        if (c->stop) break;
+      }
+      if (*p != ',' && *p != ']') p = cima__pad_ws(p);
+      if (LIKELY(*p == ',')) {
+        p = next_child(p + 1, &indent);
         continue;
       }
-      if (c->p < c->end && *c->p == ']') {
-        c->p++;
+      if (*p == ']') {
+        p++;
         break;
       }
-      syntax(c, c->p, "expected ',' or ']'");
+      syntax(c, p, "expected ',' or ']'");
       break;
     }
   }
+  c->p = p;
   c->depth--;
   list_finish(c, s, &b, out);
   if (!c->stop) check_list(c, s, out);
@@ -529,42 +761,75 @@ static void parse_array(cima_ctx *c, const cima_schema *s, void *out) {
 static void parse_object(cima_ctx *c, const cima_schema *s, void *out, const char *skip, size_t skip_len) {
   size_t before = c->nissues;
   if (!enter(c)) return;
-  const cima__object_info *info = cima__object_info_of(s);
+  const cima__object_info *info = info_of(c, s);
   size_t n = s->fields_count;
   uint64_t small = 0, *seen = n <= 64 ? &small : cilo_arena_alloc_zeroed(c->tmp, (n + 63) / 64 * 8, 8);
   size_t hint = 0;
   bool strict = s->object.unknown_keys == CIMA_UNKNOWN_KEYS_REJECT;
-  c->p = cima__ws(c->p + 1, c->end);
-  if (c->p < c->end && *c->p == '}') {
-    c->p++;
+  const char *p = cima__pad_ws(c->p + 1);
+  uint32_t indent = cima__indent_of(c->p + 1, p);
+  if (*p == '}') {
+    p++;
   } else {
     for (;;) {
-      if (c->p >= c->end || *c->p != '"') {
-        syntax(c, c->p, "expected a key");
-        break;
-      }
-      cima__str k;
-      if (!scan_str(c, &k)) break;
+      const char *key;
       size_t klen;
-      const char *key = str_text(c, &k, &klen);
-      c->p = cima__ws(c->p, c->end);
-      if (c->p >= c->end || *c->p != ':') {
-        syntax(c, c->p, "expected ':'");
+      ptrdiff_t i;
+      // keys mostly come in the order of the fields: the next one, quoted and with its colon, is compared with the
+      // text before any scan or lookup.
+      if (!skip && hint < n && cima__same(p, info->quoted[hint], info->quoted_lens[hint])) {
+        i = (ptrdiff_t)hint;
+        key = info->names[hint];
+        klen = info->lens[hint];
+        p += info->quoted_lens[hint];
+      } else {
+        if (*p != '"') {
+          syntax(c, p, "expected a key");
+          break;
+        }
+        cima__str k;
+        if (!(p = fast_str(c, p, &k))) break;
+        klen = k.len;
+        key = k.escaped ? str_text(c, &k, &klen) : k.ptr;
+        if (UNLIKELY(*p != ':')) {
+          p = cima__pad_ws(p);
+          if (*p != ':') {
+            syntax(c, p, "expected ':'");
+            break;
+          }
+        }
+        p++;
+        if (skip && klen == skip_len && memcmp(key, skip, klen) == 0) i = -2;
+        else i = cima__find_field(info, key, klen, n);
+      }
+      p += *p == ' ';
+      if ((unsigned char)*p <= ' ') p = cima__pad_ws(p);
+      if (*p == '\0' && p >= c->end) {
+        syntax(c, p, "unexpected end of input");
         break;
       }
-      c->p = cima__ws(c->p + 1, c->end);
-      if (c->p >= c->end) {
-        syntax(c, c->p, "unexpected end of input");
-        break;
-      }
-      bool is_tag = skip && klen == skip_len && memcmp(key, skip, klen) == 0;
-      ptrdiff_t i = is_tag ? -2 : cima__find_field(info, key, klen, hint);
+      c->p = p;
       if (i >= 0 && !(seen[i / 64] & (1ull << (i % 64)))) {
         seen[i / 64] |= 1ull << (i % 64);
         hint = (size_t)i + 1;
-        push_key(c, info->names[i], info->lens[i]);
-        parse_value(c, s->fields[i].schema, (char *)out + s->fields[i].offset);
-        pop(c);
+        char *field = (char *)out + s->fields[i].offset;
+        uint8_t fast = info->fast[i];
+        const char *q = nullptr;
+        if (fast) {
+          if (fast & CIMA__FAST_OPTIONAL) {
+            *(bool *)field = true;
+            q = fast_field(c, fast & ~CIMA__FAST_OPTIONAL, p, field + info->fast_offsets[i]);
+          } else {
+            q = fast_field(c, fast, p, field);
+          }
+        }
+        if (q) {
+          c->p = q;
+        } else {
+          push_key(c, info->names[i], info->lens[i]);
+          parse_value(c, s->fields[i].schema, field);
+          pop(c);
+        }
       } else {
         if (i >= 0 || (i == -1 && strict)) {
           push_key(c, key, klen);
@@ -574,20 +839,22 @@ static void parse_object(cima_ctx *c, const cima_schema *s, void *out, const cha
         }
         skip_value(c);
       }
+      p = c->p;
       if (c->stop) break;
-      c->p = cima__ws(c->p, c->end);
-      if (c->p < c->end && *c->p == ',') {
-        c->p = cima__ws(c->p + 1, c->end);
+      if (*p != ',' && *p != '}') p = cima__pad_ws(p);
+      if (LIKELY(*p == ',')) {
+        p = next_child(p + 1, &indent);
         continue;
       }
-      if (c->p < c->end && *c->p == '}') {
-        c->p++;
+      if (*p == '}') {
+        p++;
         break;
       }
-      syntax(c, c->p, "expected ',' or '}'");
+      syntax(c, p, "expected ',' or '}'");
       break;
     }
   }
+  c->p = p;
   c->depth--;
   if (c->stop) return;
   for (size_t i = 0; i < n; i++)
@@ -739,8 +1006,8 @@ static void decode_custom(cima_ctx *c, const cima_schema *s, const cima_json *in
 
 static void parse_value(cima_ctx *c, const cima_schema *s, void *out) {
   s = cima__deref(s);
-  c->p = cima__ws(c->p, c->end);
-  if (c->p >= c->end) {
+  if ((unsigned char)*c->p <= ' ') c->p = cima__pad_ws(c->p);
+  if (UNLIKELY(c->p >= c->end)) {
     syntax(c, c->p, "unexpected end of input");
     return;
   }
@@ -781,6 +1048,19 @@ static void parse_value(cima_ctx *c, const cima_schema *s, void *out) {
       mismatch(c, s->kind == CIMA_KIND_NUMBER ? "a number" : "an integer");
       return;
     }
+    if (s->kind != CIMA_KIND_NUMBER) {
+      // integers of up to 19 digits a digit at a time with a branch each, which predicts their length.
+      const char *q = c->p + (ch == '-');
+      if (*q >= '1' && *q <= '9') {
+        uint64_t u = (uint64_t)(*q++ - '0');
+        for (int i = 0; i < 18 && (unsigned)(*q - '0') < 10; i++) u = u * 10 + (uint64_t)(*q++ - '0');
+        if ((unsigned)(*q - '0') >= 10 && *q != '.' && (*q | 0x20) != 'e') {
+          store_int(c, s, ch == '-', u, false, out);
+          c->p = q;
+          break;
+        }
+      }
+    }
     cima__num n;
     const char *q = cima__scan_number(c->p, c->end, &n);
     if (!q) {
@@ -799,7 +1079,11 @@ static void parse_value(cima_ctx *c, const cima_schema *s, void *out) {
       mismatch(c, "a string");
       return;
     }
-    if (!scan_str(c, &str)) return;
+    {
+      const char *q = fast_str(c, c->p, &str);
+      if (!q) return;
+      c->p = q;
+    }
     if (s->kind == CIMA_KIND_STRING) {
       size_t cap = str.len + 1;
       char *buf = cilo_alloc(c->out, cap, 1);
@@ -890,9 +1174,18 @@ static bool stringish(const cima_schema *s) {
   return s->kind == CIMA_KIND_STRING || s->kind == CIMA_KIND_UNKNOWN;
 }
 
+// a copy of the text followed by nuls in scratch, which the parsers read without bounds checks.
+static const char *padded(cima_ctx *c, const char *t, size_t len) {
+  char *copy = cilo_arena_alloc(c->tmp, len + CIMA__PAD, 16);
+  if (len) memcpy(copy, t, len);
+  memset(copy + len, 0, CIMA__PAD);
+  return copy;
+}
+
 // json text in the middle of other text: an object in a query parameter, for instance.
 static void embedded_json(cima_ctx *c, const cima_schema *s, const char *t, size_t len, void *out) {
   const char *start = c->start, *p = c->p, *end = c->end;
+  t = padded(c, t, len);
   c->start = c->p = t;
   c->end = t + len;
   parse_value(c, s, out);
@@ -1255,8 +1548,9 @@ cima_result cima_parse_json(const cima_schema *schema, const char *json, size_t 
   begin(&r, options);
   memset(out, 0, schema->size);
   cima_ctx *c = &r.c;
-  c->start = c->p = json ? json : "";
-  c->end = c->p + (json ? len : 0);
+  if (!json) len = 0;
+  c->start = c->p = padded(c, json, len);
+  c->end = c->p + len;
   if (cima__ws(c->p, c->end) == c->end) {
     report(c, CIMA_ISSUE_INVALID_JSON, "empty input");
   } else {
