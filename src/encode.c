@@ -107,6 +107,10 @@ void cima_json_write_typed(cima_json_writer *w, const cima_schema *s, const void
     cima_json_end_object(w);
     return;
   }
+  case CIMA_KIND_CUSTOM:
+    if (s->codec && s->codec->encode) s->codec->encode(w, v);
+    else cima_json_write_null(w);
+    return;
   case CIMA_KIND_REF: return;
   }
 }
@@ -128,7 +132,8 @@ char *cima_to_json(const cima_schema *schema, const void *value, const cima_opti
 /* ========================================================================================================== */
 
 static bool is_named(const cima_schema *s) {
-  return s->name && (s->kind == CIMA_KIND_OBJECT || s->kind == CIMA_KIND_ENUM || s->kind == CIMA_KIND_TAGGED_UNION);
+  return s->name && (s->kind == CIMA_KIND_OBJECT || s->kind == CIMA_KIND_ENUM || s->kind == CIMA_KIND_TAGGED_UNION ||
+                     s->kind == CIMA_KIND_CUSTOM);
 }
 
 static void defs_add(cima_schema_defs *defs, const cima_schema *s) {
@@ -422,6 +427,18 @@ static void write_schema(cima_json_writer *w, const cima_schema *s, cima_schema_
     cima_json_begin_object(w);
     key_str(w, "propertyName", s->tag);
     cima_json_end_object(w);
+    break;
+  case CIMA_KIND_CUSTOM:
+    // the members of the codec's schema, so annotations can join them.
+    if (s->codec && s->codec->json_schema) {
+      CILO_SCRATCH(tmp, arena_of(w)) {
+        cima_json *v = cima_json_parse(tmp, s->codec->json_schema, strlen(s->codec->json_schema), nullptr);
+        CIMA_EACH(m, cima_json_object(v)) {
+          cima_json_write_key_n(w, m->key, cima_json_key_len(m));
+          cima_json_write(w, &m->value);
+        }
+      }
+    }
     break;
   case CIMA_KIND_OPTIONAL:
   case CIMA_KIND_REF: break;

@@ -53,12 +53,57 @@ if_parsed(User, kept, json, &arena) { ... }                       // parsed into
 | `Type.Strict(...)` JSON Schema | `cima_json_schema()`, named types in `$defs` |
 | `z.coerce`, query strings | `cima_parse_pairs()`, `cima_parse_text()` with `.coerce = true` |
 | `serde_json::Value`, `json!()` | `json_parse()`, `json_obj(...)`, the [DOM and builder](#json-without-a-schema) |
+| `impl Deserialize, Serialize`, `z.codec`, `Type.Unsafe` | `custom(T, ctype, &codec)`, a [type of your own](#types-of-your-own) |
+| `#[serde(with = "...")]` | `with((ctype), &codec) name`, one field through a codec |
+| `serde_json::from_value` | `cima_decode()` from a codec, a DOM node through any schema |
 
 A named type alone goes in parentheses, `(Role) role`, a node does not need them. `each(item, list)` walks
 anything with `items` and `len`, a const list or one in a const struct too, and `value_or(maybe, x)` reads a `T_maybe`.
 
 The short names come from `<cima/dsl.h>`. They are function like macros, so `string` or `array` used as plain
 identifiers are left alone, and `<cima/dsl_end.h>` drops them. `<cima/cima.h>` alone only has the `CIMA_` names.
+
+Code with names of its own like `matches` or `string` can take `<cima/json_dsl.h>` instead, the `json_` names of the DOM, the builder and the writer alone.
+
+## Types of your own
+
+A codec reads and writes a C type the way you want it, like an `impl Deserialize` and `impl Serialize` in serde. Its decoder gets the JSON value at hand as a DOM node, whatever the parser it comes from: a string for query strings and path segments, a node parsed on the spot for JSON. Its encoder writes one value with the writer, and its JSON Schema is a literal, so TypeBox style schemas stay right.
+
+Discord's ids are a good case: a `u64` in C, a string of digits on the wire, though some payloads send a number.
+
+```c
+static bool snowflake_decode(const cima_json *in, void *out, cima_ctx *ctx) {
+  uint64_t id = json_coerce(in, (uint64_t)0);                         // a number, or digits in a string
+  if (!id) {
+    cima_report(ctx, "", "must be a snowflake");                      // a path relative to the value
+    return false;
+  }
+  *(uint64_t *)out = id;
+  return true;
+}
+
+static void snowflake_encode(cima_json_writer *w, const void *value) {
+  char digits[CIMA_JSON_NUMBER_MAX];
+  cima_json_write_string_n(w, digits, cima_json_format_uint(digits, *(const uint64_t *)value));
+}
+
+static const cima_codec snowflake_codec = {
+  .decode = snowflake_decode,
+  .encode = snowflake_encode,
+  .json_schema = literal({"type": "string", "pattern": "^[0-9]+$"}),
+};
+
+custom(Snowflake, uint64_t, &snowflake_codec, describe("a discord id"));
+
+object(Member,
+  (Snowflake)                          id,                            // a named type like any other
+  array(Snowflake)                     roles,                         // Snowflake_list
+  optional(Snowflake)                  nick_by,                       // Snowflake_maybe
+  with((uint64_t), &snowflake_codec)   guild,                         // one field of a plain type
+);
+```
+
+`custom()` declares `Snowflake`, `Snowflake_list`, `Snowflake_maybe` and `Snowflake_schema`, which the JSON Schema puts in `$defs` under its name with the codec's literal and the options. A decoder that keeps memory takes it with `cima_alloc()` or `cima_strdup()`, from the arena or allocator of the parse, and gives a `.dispose` for heap parses. One that wraps another schema decodes the node through it with `cima_decode()`, issues landing under the value: a point read from `[x, y]` or `{"x": .., "y": ..}` is a few lines. A decoder that returns false without a report gets a generic `is not valid` issue.
 
 ## Memory
 

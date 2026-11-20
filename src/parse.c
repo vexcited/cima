@@ -678,6 +678,65 @@ static const char *literal(cima_ctx *c, const char *word, size_t n) {
   return c->p + n;
 }
 
+// the json value at c->p as a dom node for a codec: scalars on the spot, containers parsed into scratch.
+static bool read_node(cima_ctx *c, cima_json *node) {
+  const char *start = c->p;
+  char ch = *start;
+  if (ch == '"') {
+    cima__str str;
+    if (!scan_str(c, &str)) return false;
+    size_t len;
+    const char *text = str_text(c, &str, &len);
+    if (!str.escaped) text = memcpy(cilo_arena_alloc(c->tmp, len + 1, 1), text, len);
+    ((char *)text)[len] = '\0';
+    *node = (cima_json){.type = CIMA_JSON_STRING, .len = (uint32_t)len, .str = text};
+    return true;
+  }
+  if (ch == '{' || ch == '[') {
+    skip_value(c);
+    if (c->stop) return false;
+    cima_json *dom = cima_json_parse(c->tmp, start, (size_t)(c->p - start), nullptr);
+    if (!dom) {
+      syntax(c, start, "invalid json");
+      return false;
+    }
+    *node = *dom;
+    return true;
+  }
+  if (ch == 't' || ch == 'f' || ch == 'n') {
+    const char *q = literal(c, ch == 't' ? "true" : ch == 'f' ? "false" : "null", ch == 'f' ? 5 : 4);
+    if (!q) return false;
+    *node = ch == 'n' ? (cima_json){} : (cima_json){.type = CIMA_JSON_BOOL, .b = ch == 't'};
+    c->p = q;
+    return true;
+  }
+  cima__num n;
+  const char *q = cima__scan_number(c->p, c->end, &n);
+  if (!q) {
+    syntax(c, c->p, ch == '-' || (ch >= '0' && ch <= '9') ? "invalid number" : "unexpected character");
+    return false;
+  }
+  uint64_t mag;
+  if (n.plain && cima__num_magnitude(&n, &mag) == CIMA__INT_OK && (!n.neg || mag <= (uint64_t)INT64_MAX + 1)) {
+    if (n.neg) *node = (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)(0 - mag)};
+    else if (mag <= INT64_MAX) *node = (cima_json){.type = CIMA_JSON_INT, .i = (int64_t)mag};
+    else *node = (cima_json){.type = CIMA_JSON_UINT, .u = mag};
+  } else {
+    *node = (cima_json){.type = CIMA_JSON_DOUBLE, .d = cima__num_double(&n, c->p, (size_t)(q - c->p))};
+  }
+  c->p = q;
+  return true;
+}
+
+static void decode_custom(cima_ctx *c, const cima_schema *s, const cima_json *in, void *out) {
+  size_t before = c->nissues;
+  if (!s->codec || !s->codec->decode) {
+    report(c, CIMA_ISSUE_CUSTOM, "has no decoder");
+    return;
+  }
+  if (!s->codec->decode(in, out, c) && c->nissues == before) report(c, CIMA_ISSUE_INVALID_TYPE, "is not valid");
+}
+
 static void parse_value(cima_ctx *c, const cima_schema *s, void *out) {
   s = cima__deref(s);
   c->p = cima__ws(c->p, c->end);
@@ -807,6 +866,12 @@ static void parse_value(cima_ctx *c, const cima_schema *s, void *out) {
     }
     parse_tagged(c, s, out);
     break;
+  case CIMA_KIND_CUSTOM: {
+    cima_json in;
+    if (!read_node(c, &in)) return;
+    decode_custom(c, s, &in, out);
+    break;
+  }
   case CIMA_KIND_REF: break;
   }
   refine(c, s, out, before);
@@ -909,6 +974,21 @@ static void from_text(cima_ctx *c, const cima_schema *s, const char *t, size_t l
     while (p < t + len && is_space(*p)) p++;
     if (p < t + len && *p == '{') embedded_json(c, s, t, len, out);
     else report(c, CIMA_ISSUE_INVALID_TYPE, "expected an object");
+    return;
+  }
+  case CIMA_KIND_CUSTOM: {
+    // json text in the middle of other text reaches the codec as what it holds, anything else as a string.
+    const char *p = t;
+    while (p < t + len && is_space(*p)) p++;
+    cima_json *node = p < t + len && (*p == '{' || *p == '[') ? cima_json_parse(c->tmp, t, len, nullptr) : nullptr;
+    cima_json text;
+    if (!node) {
+      char *copy = memcpy(cilo_arena_alloc(c->tmp, len + 1, 1), t, len);
+      copy[len] = '\0';
+      text = (cima_json){.type = CIMA_JSON_STRING, .len = (uint32_t)len, .str = copy};
+      node = &text;
+    }
+    decode_custom(c, s, node, out);
     return;
   }
   case CIMA_KIND_REF: return;
@@ -1078,10 +1158,28 @@ static void check_value(cima_ctx *c, const cima_schema *s, const void *v) {
     }
     break;
   }
+  case CIMA_KIND_CUSTOM:
   case CIMA_KIND_REF: break;
   }
   c->depth--;
   refine(c, s, v, before);
+}
+
+void *cima_alloc(cima_ctx *c, size_t size, size_t align) { return cilo_alloc(c->out, size ? size : 1, align); }
+
+char *cima_strdup(cima_ctx *c, const char *s, size_t len) {
+  char *copy = cilo_alloc(c->out, len + 1, 1);
+  memcpy(copy, s, len);
+  copy[len] = '\0';
+  return copy;
+}
+
+bool cima_decode(cima_ctx *c, const cima_schema *schema, const cima_json *in, void *out) {
+  size_t before = c->nissues;
+  size_t len;
+  const char *text = cima_json_text(CILO_OF(c->tmp), in, &len);
+  embedded_json(c, schema, text, len, out);
+  return c->nissues == before;
 }
 
 /* ========================================================================================================== */
@@ -1377,6 +1475,7 @@ uint64_t cima__value_hash(const cima_schema *s, const void *v) {
     return h;
   }
   case CIMA_KIND_ENUM: return mix(9, (uint64_t)cima__read_enum(v, s->size));
+  case CIMA_KIND_CUSTOM: return mix(12, cima__hash(v, s->size));
   case CIMA_KIND_TAGGED_UNION: {
     int64_t k = cima__read_enum((const char *)v + s->tag_offset, CIMA__KIND_SIZE);
     if (k < 0 || (size_t)k >= s->fields_count) return 10;
@@ -1427,6 +1526,10 @@ static void dispose(const cima_schema *s, void *v, cilo_allocator *a) {
     if (k >= 0 && (size_t)k < s->fields_count) dispose(s->fields[k].schema, (char *)v + s->fields[k].offset, a);
     return;
   }
+  case CIMA_KIND_CUSTOM:
+    if (s->codec && s->codec->dispose) s->codec->dispose(v, a);
+    memset(v, 0, s->size);
+    return;
   default: return;
   }
 }

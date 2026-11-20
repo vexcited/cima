@@ -44,6 +44,8 @@ typedef enum cima_kind : uint8_t {
   CIMA_KIND_TAGGED_UNION,
   // points at a named schema, rendered as a $ref.
   CIMA_KIND_REF,
+  // a c type read and written by a codec of your own.
+  CIMA_KIND_CUSTOM,
 } cima_kind;
 
 typedef enum cima_format : uint8_t {
@@ -82,6 +84,24 @@ void cima_dispose_with(const cima_schema *schema, void *value, cilo_allocator *a
 
 // custom check run after the built in ones, report problems with cima_report and return false.
 typedef bool cima_refine_fn(const void *value, cima_ctx *ctx);
+
+typedef struct cima_json cima_json;
+typedef struct cima_json_writer cima_json_writer;
+
+// serde's Deserialize and Serialize for a c type of your own, zod's codecs, typebox's Unsafe. the parsers hand
+// `decode` the json value at hand as a dom node, a string for text and pairs, and the writers call `encode`.
+typedef struct cima_codec {
+  // reads `in` into `out`, zeroed. problems go to cima_report with a path relative to the value, and false.
+  // memory the value keeps comes from cima_alloc, and nested values decode with cima_decode.
+  bool (*decode)(const cima_json *in, void *out, cima_ctx *ctx);
+  // writes `value` where the writer stands, one json value.
+  void (*encode)(cima_json_writer *w, const void *value);
+  // the json schema of the wire format, json text such as CIMA_LITERAL({"type": "string"}). {} when null.
+  const char *json_schema;
+  // releases what `decode` put in a value on the heap or an allocator, for cima_dispose. null when it keeps
+  // nothing or only uses arenas.
+  void (*dispose)(void *value, cilo_allocator *alloc);
+} cima_codec;
 
 // options every kind accepts. example and default_json hold json text.
 #define CIMA__COMMON_OPTS                                                                                        \
@@ -159,6 +179,8 @@ struct cima_schema {
   // tagged unions, the json key holding the variant name and where the c enum sits.
   const char *tag;
   size_t tag_offset;
+  // custom types.
+  const cima_codec *codec;
   // every member starts with CIMA__COMMON_OPTS, so `common` reads them whatever the kind.
   union {
     cima_common_opts common;
@@ -317,6 +339,8 @@ CIMA__PRIMITIVES(CIMA__DECLARE_PRIMITIVE)
 /* ========================================================================================================== */
 
 #define CIMA_DESCRIBE(text) .doc = text
+// json text written as is in c: CIMA_LITERAL({"type": "string"}) is "{\"type\": \"string\"}".
+#define CIMA_LITERAL(...) #__VA_ARGS__
 // json literals, written as is: CIMA_FALLBACK(20), CIMA_FALLBACK("guest"), CIMA_FALLBACK({"a": 1}).
 #define CIMA_EXAMPLE(...) .example = #__VA_ARGS__
 #define CIMA_FALLBACK(...) .default_json = #__VA_ARGS__
@@ -460,6 +484,33 @@ CIMA__PRIMITIVES(CIMA__DECLARE_PRIMITIVE)
   };                                                                                                             \
   CIMA__LIST_SCHEMA(T)
 
+// a c type of your own read and written by `codec`, a const cima_codec *, like serde's impl Deserialize:
+//
+//   CIMA_CUSTOM(Snowflake, uint64_t, &snowflake_codec);        Snowflake, Snowflake_list, Snowflake_maybe
+//   CIMA_OBJECT(User, (Snowflake) id, CIMA_ARRAY(Snowflake) roles)
+//
+// options every kind accepts come after the codec. the json schema puts it in $defs under its name.
+#define CIMA_CUSTOM(T, ctype, codec_ptr, ...)                                                                      \
+  typedef ctype T;                                                                                               \
+  [[maybe_unused]] static const cima_schema T##_schema;                                                          \
+  CIMA__NAMED_EXTRAS(T);                                                                                         \
+  [[maybe_unused]] static const cima_schema T##_schema = {                                                       \
+      .kind = CIMA_KIND_CUSTOM,                                                                                  \
+      .name = #T,                                                                                                \
+      .size = sizeof(T),                                                                                         \
+      .align = alignof(T),                                                                                       \
+      .codec = codec_ptr,                                                                                        \
+      .common = {__VA_ARGS__},                                                                                   \
+  };                                                                                                             \
+  CIMA__LIST_SCHEMA(T)
+
+// serde's #[serde(with = ...)]: one field of a plain c type read and written by `codec`, with no named type.
+// CIMA_WITH((uint64_t), &snowflake_codec) id.
+#define CIMA_WITH(ctype, codec_ptr, ...)                                                                         \
+  (cima__typed, ctype,                                                                                           \
+   (.kind = CIMA_KIND_CUSTOM, .size = sizeof(CIMA_PP_UNPAREN ctype), .align = alignof(CIMA_PP_UNPAREN ctype),     \
+    .codec = codec_ptr, .common = {__VA_ARGS__}))
+
 // list item plumbing, items are `(cima__field, name, node)`, `(cima__variant, name, node)`,
 // `(cima__options, (designators))` or `(cima__validate, fn)`.
 #define CIMA__OBJ_DECL(...) __VA_OPT__(CIMA__OBJ_DECL_I(CIMA_PP_UNPAREN __VA_ARGS__))
@@ -602,12 +653,19 @@ typedef struct cima_schema_defs {
   size_t cap;
 } cima_schema_defs;
 
-typedef struct cima_json_writer cima_json_writer;
 // writes the schema of `schema` where `w` stands, named types as $ref, collected into `defs`.
 void cima_json_schema_write(cima_json_writer *w, const cima_schema *schema, cima_schema_defs *defs);
 // writes {"Name": {...}, ...} for every type collected so far, and the ones they reference in turn.
 void cima_json_schema_write_defs(cima_json_writer *w, cima_schema_defs *defs);
 void cima_schema_defs_dispose(cima_schema_defs *defs);
+
+// memory from the allocator a parse writes its value to, for what a codec's value keeps. an arena or the heap
+// alike, cima_dispose releases it through the codec's dispose.
+void *cima_alloc(cima_ctx *ctx, size_t size, size_t align);
+// a string copied with cima_alloc.
+char *cima_strdup(cima_ctx *ctx, const char *s, size_t len);
+// decodes a dom node through `schema` from a codec, issues land under the codec's value. false on issues.
+bool cima_decode(cima_ctx *ctx, const cima_schema *schema, const cima_json *in, void *out);
 
 // adds an issue from a refinement, `path` is relative to the refined value. both strings are copied.
 void cima_report(cima_ctx *ctx, const char *path, const char *message);

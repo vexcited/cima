@@ -34,7 +34,6 @@ typedef enum cima_json_type : uint8_t {
   CIMA_JSON_TYPED,
 } cima_json_type;
 
-typedef struct cima_json cima_json;
 typedef struct cima_json_member cima_json_member;
 
 typedef struct cima_json_typed {

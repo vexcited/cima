@@ -22,6 +22,8 @@
 #undef array
 #undef optional
 #undef nullable
+#undef custom
+#undef with
 #undef object
 #undef field
 #undef options
@@ -34,6 +36,7 @@
 #undef each
 #undef value_or
 #undef describe
+#undef literal
 #undef example
 #undef fallback
 #undef refine

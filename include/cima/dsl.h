@@ -25,6 +25,8 @@
 #define array(...)         CIMA_ARRAY(__VA_ARGS__)
 #define optional(...)      CIMA_OPTIONAL(__VA_ARGS__)
 #define nullable(...)      CIMA_NULLABLE(__VA_ARGS__)
+#define custom(...)        CIMA_CUSTOM(__VA_ARGS__)
+#define with(...)          CIMA_WITH(__VA_ARGS__)
 
 #define object(...)        CIMA_OBJECT(__VA_ARGS__)
 #define field(...)         CIMA_FIELD(__VA_ARGS__)
@@ -39,6 +41,7 @@
 #define value_or(...)      CIMA_VALUE_OR(__VA_ARGS__)
 
 #define describe(...)      CIMA_DESCRIBE(__VA_ARGS__)
+#define literal(...)       CIMA_LITERAL(__VA_ARGS__)
 #define example(...)       CIMA_EXAMPLE(__VA_ARGS__)
 #define fallback(...)      CIMA_FALLBACK(__VA_ARGS__)
 #define refine(...)        CIMA_REFINE(__VA_ARGS__)
