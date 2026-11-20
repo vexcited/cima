@@ -448,8 +448,164 @@ static void formatting(void) {
   CHECK(exact);
 }
 
+// random strings mixing ascii runs, escapes and utf-8, decoded by the dom into a copy that moves as it reads:
+// every shift between what is read and what is written comes up, and the bytes must come out as written.
+static uint64_t rng_state = 0x9e3779b97f4a7c15ull;
+
+static uint32_t rng(uint32_t n) {
+  rng_state ^= rng_state << 13;
+  rng_state ^= rng_state >> 7;
+  rng_state ^= rng_state << 17;
+  return (uint32_t)(rng_state % n);
+}
+
+static char *put_utf8(char *d, uint32_t u) {
+  if (u < 0x80) {
+    *d++ = (char)u;
+  } else if (u < 0x800) {
+    *d++ = (char)(0xc0 | u >> 6);
+    *d++ = (char)(0x80 | (u & 0x3f));
+  } else if (u < 0x10000) {
+    *d++ = (char)(0xe0 | u >> 12);
+    *d++ = (char)(0x80 | ((u >> 6) & 0x3f));
+    *d++ = (char)(0x80 | (u & 0x3f));
+  } else {
+    *d++ = (char)(0xf0 | u >> 18);
+    *d++ = (char)(0x80 | ((u >> 12) & 0x3f));
+    *d++ = (char)(0x80 | ((u >> 6) & 0x3f));
+    *d++ = (char)(0x80 | (u & 0x3f));
+  }
+  return d;
+}
+
+static uint32_t random_code_point(void) {
+  switch (rng(4)) {
+  case 0: return 0x80 + rng(0x800 - 0x80);
+  case 1: return 0x3040 + rng(0x60);
+  case 2: {
+    uint32_t u = 0x800 + rng(0x10000 - 0x800);
+    return u >= 0xd800 && u <= 0xdfff ? 0xe000 : u;
+  }
+  default: return 0x10000 + rng(0x110000 - 0x10000);
+  }
+}
+
+// one string body into `text` and what it decodes to into `want`.
+static void random_body(char **text, char **want) {
+  char *t = *text, *w = *want;
+  for (uint32_t pieces = rng(12); pieces--;) {
+    switch (rng(6)) {
+    case 0:
+    case 1:
+      for (uint32_t n = rng(3) ? rng(10) : 16 + rng(40); n--;) {
+        char c = (char)(' ' + rng(95));
+        if (c == '"' || c == '\\') c = 'x';
+        *t++ = *w++ = c;
+      }
+      break;
+    case 2: {
+      static const char escapes[] = "\"\\/bfnrt", decoded[] = "\"\\/\b\f\n\r\t";
+      uint32_t i = rng(8);
+      *t++ = '\\';
+      *t++ = escapes[i];
+      *w++ = decoded[i];
+      break;
+    }
+    case 3: {
+      uint32_t u = rng(5) ? random_code_point() : rng(0x80);
+      if (u >= 0x10000) {
+        uint32_t v = u - 0x10000;
+        t += snprintf(t, 16, "\\u%04X\\u%04x", 0xd800 + (v >> 10), 0xdc00 + (v & 0x3ff));
+      } else {
+        t += snprintf(t, 8, "\\u%04x", u);
+      }
+      w = put_utf8(w, u);
+      break;
+    }
+    default:
+      for (uint32_t n = 1 + rng(8); n--;) {
+        uint32_t u = random_code_point();
+        t = put_utf8(t, u);
+        w = put_utf8(w, u);
+      }
+      break;
+    }
+  }
+  *text = t;
+  *want = w;
+}
+
+static void strings_at_random(void) {
+  with_arena(a) {
+    for (int round = 0; round < 20000; round++) {
+      cilo_mark mark = cilo_mark_of(a);
+      char *text = cilo_arena_alloc(a, 8192, 1), *t = text;
+      char *wants[8], *ends[8];
+      uint32_t count = 1 + rng(8);
+      *t++ = '{';
+      for (uint32_t i = 0; i < count; i++) {
+        if (i) *t++ = ',';
+        if (rng(2)) t += snprintf(t, 16, "\n%*s", (int)rng(9), "");
+        t += snprintf(t, 32, "\"k%u\": \"", i);
+        wants[i] = ends[i] = cilo_arena_alloc(a, 1024, 1);
+        random_body(&t, &ends[i]);
+        *t++ = '"';
+      }
+      *t++ = '}';
+      size_t len = (size_t)(t - text);
+      // one byte made invalid in some of them.
+      size_t broken = rng(4) ? SIZE_MAX : rng((uint32_t)len);
+      static const unsigned char bad[] = {0xff, 0x80, 0xc0, 0x01, 0xed, 0xf5};
+      if (broken != SIZE_MAX) text[broken] = (char)bad[rng(sizeof bad)];
+      cima_json *doc = json_parse(a, text, len, nullptr);
+      if (broken == SIZE_MAX) {
+        CHECK(doc && json_len(doc) == count && cima_json_valid(text, len));
+        for (uint32_t i = 0; doc && i < count; i++) {
+          cima_json *s = &json_members(doc).items[i].value;
+          size_t n = (size_t)(ends[i] - wants[i]);
+          bool same = s->type == CIMA_JSON_STRING && s->len == n && memcmp(s->str, wants[i], n) == 0 &&
+                      s->str[n] == '\0';
+          if (!same) fprintf(stderr, "round %d, string %u: %.*s\n", round, i, (int)len, text);
+          CHECK(same);
+        }
+      } else if (doc) {
+        // the broken byte may have landed somewhere it is valid.
+        CHECK(cima_json_valid(text, len));
+      } else {
+        CHECK(!cima_json_valid(text, len));
+      }
+      cilo_rewind(mark);
+    }
+  }
+}
+
+// integers written by the dom writer, every digit count and both signs, against snprintf.
+static void integers_written(void) {
+  with_arena(a) {
+    for (int i = 0; i < 200000; i++) {
+      uint64_t u = ((uint64_t)rng(1u << 31) << 33) ^ ((uint64_t)rng(1u << 31) << 2) ^ rng(4);
+      u >>= rng(64);
+      if (i < 64) u = i < 20 ? (uint64_t)1 << (3 * i) : UINT64_MAX >> (i - 20);
+      char want[32];
+      snprintf(want, sizeof want, "%llu", (unsigned long long)u);
+      CHECK_STR(json_text(a, json_of(u)), want);
+      int64_t s = -(int64_t)(u >> 1);
+      snprintf(want, sizeof want, "%lld", (long long)s);
+      CHECK_STR(json_text(a, json_of(s)), want);
+      for (uint64_t p = 1; i == 0 && p; p = p <= UINT64_MAX / 10 ? p * 10 : 0) {
+        for (int k = -1; k <= 1; k++) {
+          snprintf(want, sizeof want, "%llu", (unsigned long long)(p + (uint64_t)k));
+          CHECK_STR(json_text(a, json_of(p + (uint64_t)k)), want);
+        }
+      }
+    }
+  }
+}
+
 int main(void) {
   parsing();
+  strings_at_random();
+  integers_written();
   formatting();
   reading();
   changing();
