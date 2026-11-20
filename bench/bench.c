@@ -1,6 +1,7 @@
 #include <cilo/dsl.h>
 #include <cima/dsl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #ifdef CIMA_BENCH_YYJSON
@@ -351,7 +352,66 @@ static void run_build(int members, int iterations) {
   }
 }
 
-int main(void) {
+/* ========================================================================================================== */
+/* json files given on the command line, the usual ones being twitter.json, citm_catalog.json and canada.json. */
+/* ========================================================================================================== */
+
+static void run_file(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) {
+    fprintf(stderr, "%s: cannot open\n", path);
+    return;
+  }
+  with_arena(data) {
+    fseek(f, 0, SEEK_END);
+    size_t len = (size_t)ftell(f);
+    rewind(f);
+    char *text = cilo_arena_alloc(data, len + 1, 1);
+    len = fread(text, 1, len, f);
+    text[len] = '\0';
+    cima_json *doc = json_parse(data, text, len, nullptr);
+    if (!doc) {
+      fprintf(stderr, "%s: not json\n", path);
+      continue;
+    }
+    int iterations = (int)(200000000 / (len + 1)) + 1;
+    size_t out = 0;
+    printf("\n%s, %zu bytes. microseconds per run, and MB/s of json.\n\n", path, len);
+    printf("| %-38s | %10s | %8s |\n", "operation", "us", "MB/s");
+    printf("| %-38s | %10s | %8s |\n", "--------------------------------------", "----------", "--------");
+    cilo_arena work = {};
+    double ns;
+    MEASURE(ns, iterations, rewinding(&work) sink += json_len(json_parse(&work, text, len, nullptr)));
+    row("dom parse, cima_json_parse", ns, len);
+    MEASURE(ns, iterations, rewinding(&work) cima_json_text(CILO_OF(&work), doc, &out));
+    row("dom write, cima_json_text", ns, out);
+    MEASURE(ns, iterations, sink += cima_json_valid(text, len));
+    row("validate only, cima_json_valid", ns, len);
+#ifdef CIMA_BENCH_YYJSON
+    MEASURE(ns, iterations, {
+      yyjson_doc *y = yyjson_read(text, len, 0);
+      sink += yyjson_doc_get_val_count(y);
+      yyjson_doc_free(y);
+    });
+    row("yyjson_read, for comparison", ns, len);
+    yyjson_doc *y = yyjson_read(text, len, 0);
+    MEASURE(ns, iterations, {
+      char *t = yyjson_write(y, 0, &out);
+      free(t);
+    });
+    row("yyjson_write, for comparison", ns, out);
+    yyjson_doc_free(y);
+#endif
+    cilo_arena_drop(&work);
+  }
+  fclose(f);
+}
+
+int main(int argc, char **argv) {
+  if (argc > 1) {
+    for (int i = 1; i < argc; i++) run_file(argv[i]);
+    return sink == 0;
+  }
   run(1, 20000);
   run(100, 300);
   run_font_index(3000, 50);

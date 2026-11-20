@@ -275,6 +275,7 @@ ninja -C build
 ctest --test-dir build                                              # tests and examples
 cmake -S . -B release -G Ninja -DCMAKE_BUILD_TYPE=Release -DFETCHCONTENT_SOURCE_DIR_CILO=../ciko-cilo
 ninja -C release cima_bench && release/cima_bench
+release/cima_bench twitter.json citm_catalog.json canada.json      # any json files, yyjson next to them
 ```
 
 The tests cover a JSON conformance suite, every option and format, round trips, JSON Schema output, pairs and
