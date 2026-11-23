@@ -139,7 +139,7 @@ const char *cima_json_as_string(const cima_json *v, const char *fallback);
 // `CIMA_JSON_OR(v, nullptr)` is the string or null.
 #define CIMA_JSON_OR(v, fallback)                                                                                \
   _Generic((fallback),                                                                                           \
-      nullptr_t: cima_json__string_or_null,                                                                      \
+      typeof(nullptr): cima_json__string_or_null,                                                                \
       bool: cima_json_as_bool,                                                                                   \
       float: cima_json_as_double,                                                                                \
       double: cima_json_as_double,                                                                               \
@@ -151,7 +151,7 @@ const char *cima_json_as_string(const cima_json *v, const char *fallback);
 // the member `key` of `v` read the same way: `CIMA_JSON_GET_OR(user, "name", nullptr)`.
 #define CIMA_JSON_GET_OR(v, key, fallback) CIMA_JSON_OR(cima_json_get(v, key), fallback)
 
-static inline const char *cima_json__string_or_null(const cima_json *v, nullptr_t) {
+static inline const char *cima_json__string_or_null(const cima_json *v, typeof(nullptr)) {
   return cima_json_as_string(v, nullptr);
 }
 
@@ -183,7 +183,7 @@ bool cima_json_coerce_bool(const cima_json *v, bool fallback);
 /* a comparison is an int in c, write `(bool)(a < b)` for a boolean.                                          */
 /* ========================================================================================================== */
 
-static inline cima_json cima_json__null(nullptr_t) { return (cima_json){}; }
+static inline cima_json cima_json__null(typeof(nullptr)) { return (cima_json){}; }
 static inline cima_json cima_json__bool(bool b) { return (cima_json){.type = CIMA_JSON_BOOL, .b = b}; }
 static inline cima_json cima_json__int(int64_t i) { return (cima_json){.type = CIMA_JSON_INT, .i = i}; }
 static inline cima_json cima_json__uint(uint64_t u) {
@@ -196,7 +196,7 @@ static inline cima_json cima_json__node(const cima_json *v) { return v ? *v : (c
 
 #define CIMA_JSON_V(x)                                                                                           \
   _Generic((x),                                                                                                  \
-      nullptr_t: cima_json__null,                                                                                \
+      typeof(nullptr): cima_json__null,                                                                          \
       bool: cima_json__bool,                                                                                     \
       char: cima_json__int,                                                                                      \
       signed char: cima_json__int,                                                                               \
