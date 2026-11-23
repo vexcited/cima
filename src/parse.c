@@ -94,7 +94,7 @@ static const char *render_path(cima_ctx *c, const char *suffix) {
   return cima_json_writer_finish(&w, nullptr);
 }
 
-static void report_at(cima_ctx *c, cima_issue_code code, const char *message, const char *suffix) {
+[[gnu::cold]] static void report_at(cima_ctx *c, cima_issue_code code, const char *message, const char *suffix) {
   if (c->stop) return;
   if (UNLIKELY(c->nissues == c->issues_cap)) {
     size_t cap = c->issues_cap ? c->issues_cap * 2 : 8;
@@ -106,9 +106,12 @@ static void report_at(cima_ctx *c, cima_issue_code code, const char *message, co
   if (c->max_issues && c->nissues >= c->max_issues) c->stop = true;
 }
 
-static void report(cima_ctx *c, cima_issue_code code, const char *message) { report_at(c, code, message, nullptr); }
+[[gnu::cold]] static void report(cima_ctx *c, cima_issue_code code, const char *message) {
+  report_at(c, code, message, nullptr);
+}
 
-[[gnu::format(printf, 3, 4)]] static void reportf(cima_ctx *c, cima_issue_code code, const char *fmt, ...) {
+[[gnu::cold, gnu::format(printf, 3, 4)]]
+static void reportf(cima_ctx *c, cima_issue_code code, const char *fmt, ...) {
   if (c->stop) return;
   va_list ap;
   va_start(ap, fmt);
@@ -118,7 +121,7 @@ static void report(cima_ctx *c, cima_issue_code code, const char *message) { rep
   report(c, code, cilo_strdup(CILO_OF(c->tmp), buf));
 }
 
-static void syntax(cima_ctx *c, const char *at, const char *message) {
+[[gnu::cold]] static void syntax(cima_ctx *c, const char *at, const char *message) {
   if (c->stop) return;
   reportf(c, CIMA_ISSUE_INVALID_JSON, "%s at offset %zu", message, (size_t)(at - c->start));
   c->stop = true;
@@ -589,7 +592,7 @@ static void skip_value(cima_ctx *c) {
   c->p = q;
 }
 
-static void mismatch(cima_ctx *c, const char *expected) {
+[[gnu::cold]] static void mismatch(cima_ctx *c, const char *expected) {
   reportf(c, CIMA_ISSUE_INVALID_TYPE, "expected %s, got %s", expected, got(*c->p));
   skip_value(c);
 }

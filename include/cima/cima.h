@@ -638,9 +638,10 @@ cima_result cima_parse_text(const cima_schema *schema, const char *text, void *o
 // validates a value built in c.
 cima_result cima_check(const cima_schema *schema, const void *value, const cima_options *options);
 // encodes `value` as json, allocated from the options' allocator.
+[[gnu::returns_nonnull]]
 char *cima_to_json(const cima_schema *schema, const void *value, const cima_options *options, size_t *len);
 // the json schema of `schema`, draft 2020-12 and typebox style: named types go to $defs and are used through $ref.
-char *cima_json_schema(const cima_schema *schema, const cima_options *options);
+[[gnu::returns_nonnull]] char *cima_json_schema(const cima_schema *schema, const cima_options *options);
 
 // named types met while rendering schemas into a larger document, an openapi one for instance. zeroed is ready.
 typedef struct cima_schema_defs {
@@ -661,16 +662,17 @@ void cima_schema_defs_dispose(cima_schema_defs *defs);
 
 // memory from the allocator a parse writes its value to, for what a codec's value keeps. an arena or the heap
 // alike, cima_dispose releases it through the codec's dispose.
+[[gnu::returns_nonnull, gnu::alloc_size(2), gnu::alloc_align(3)]]
 void *cima_alloc(cima_ctx *ctx, size_t size, size_t align);
 // a string copied with cima_alloc.
-char *cima_strdup(cima_ctx *ctx, const char *s, size_t len);
+[[gnu::returns_nonnull]] char *cima_strdup(cima_ctx *ctx, const char *s, size_t len);
 // decodes a dom node through `schema` from a codec, issues land under the codec's value. false on issues.
 bool cima_decode(cima_ctx *ctx, const cima_schema *schema, const cima_json *in, void *out);
 
 // adds an issue from a refinement, `path` is relative to the refined value. both strings are copied.
-void cima_report(cima_ctx *ctx, const char *path, const char *message);
+[[gnu::cold]] void cima_report(cima_ctx *ctx, const char *path, const char *message);
 // the same with a code other than CIMA_ISSUE_CUSTOM.
-void cima_report_code(cima_ctx *ctx, const char *path, cima_issue_code code, const char *message);
+[[gnu::cold]] void cima_report_code(cima_ctx *ctx, const char *path, cima_issue_code code, const char *message);
 
 void cima_result_dispose(cima_result *result);
 

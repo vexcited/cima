@@ -678,8 +678,8 @@ static inline bool cima__plain_kind(const cima_schema *f) {
 
 const cima__object_info *cima__object_info_of(const cima_schema *object);
 // index of the field named `key` or -1. `hint` is the expected index, keys usually come in declaration order.
-ptrdiff_t cima__find_field(const cima__object_info *info, const char *key, size_t len, size_t hint);
-uint64_t cima__hash(const void *p, size_t len);
+[[gnu::pure]] ptrdiff_t cima__find_field(const cima__object_info *info, const char *key, size_t len, size_t hint);
+[[gnu::pure]] uint64_t cima__hash(const void *p, size_t len);
 
 // the compiled pattern, null when it does not compile.
 const void *cima__regex_of(const char *pattern);
@@ -689,7 +689,7 @@ bool cima__regex_match(const void *regex, const char *s);
 /* text formats.                                                                                              */
 /* ========================================================================================================== */
 
-bool cima__check_format(cima_format format, const char *s, size_t len);
+[[gnu::pure]] bool cima__check_format(cima_format format, const char *s, size_t len);
 // iso 8601 with a time zone, or a plain date, to milliseconds since the epoch.
 bool cima__parse_timestamp(const char *s, size_t len, int64_t *ms);
 // `2026-10-29T13:47:10.000Z`, at most 32 bytes.
@@ -705,8 +705,8 @@ size_t cima__base64_encode(const uint8_t *p, size_t len, char *out);
 
 // deep copy of a typed value, every pointer allocated again from `a`.
 void cima__clone_value(const cima_schema *s, void *dst, const void *src, cilo_allocator *a);
-bool cima__value_eq(const cima_schema *s, const void *a, const void *b);
-uint64_t cima__value_hash(const cima_schema *s, const void *v);
+[[gnu::pure]] bool cima__value_eq(const cima_schema *s, const void *a, const void *b);
+[[gnu::pure]] uint64_t cima__value_hash(const cima_schema *s, const void *v);
 
 // a list as cima lays them out, cap only on named lists.
 typedef struct cima__list {

@@ -122,18 +122,18 @@ static inline cima_json_members cima_json_object(const cima_json *v) {
 }
 static inline size_t cima_json_key_len(const cima_json_member *m) { return m->key_len ? m->key_len : strlen(m->key); }
 
-cima_json *cima_json_get(const cima_json *object, const char *key);
-cima_json *cima_json_get_n(const cima_json *object, const char *key, size_t len);
-cima_json *cima_json_index(const cima_json *array, size_t index);
+[[gnu::pure]] cima_json *cima_json_get(const cima_json *object, const char *key);
+[[gnu::pure]] cima_json *cima_json_get_n(const cima_json *object, const char *key, size_t len);
+[[gnu::pure]] cima_json *cima_json_index(const cima_json *array, size_t index);
 // rfc 6901: "/files/0/name", "" is the root.
-cima_json *cima_json_at(const cima_json *root, const char *pointer);
+[[gnu::pure]] cima_json *cima_json_at(const cima_json *root, const char *pointer);
 
 // the value when it has the type, else the fallback. integers read from doubles that hold one exactly.
-bool cima_json_as_bool(const cima_json *v, bool fallback);
-int64_t cima_json_as_int(const cima_json *v, int64_t fallback);
-uint64_t cima_json_as_uint(const cima_json *v, uint64_t fallback);
-double cima_json_as_double(const cima_json *v, double fallback);
-const char *cima_json_as_string(const cima_json *v, const char *fallback);
+[[gnu::pure]] bool cima_json_as_bool(const cima_json *v, bool fallback);
+[[gnu::pure]] int64_t cima_json_as_int(const cima_json *v, int64_t fallback);
+[[gnu::pure]] uint64_t cima_json_as_uint(const cima_json *v, uint64_t fallback);
+[[gnu::pure]] double cima_json_as_double(const cima_json *v, double fallback);
+[[gnu::pure]] const char *cima_json_as_string(const cima_json *v, const char *fallback);
 
 // the fallback's type picks the reader: `CIMA_JSON_OR(v, 25)`, `CIMA_JSON_OR(v, "guest")`, `CIMA_JSON_OR(v, false)`.
 // `CIMA_JSON_OR(v, nullptr)` is the string or null.
@@ -161,7 +161,7 @@ static inline const char *cima_json__string_or_null(const cima_json *v, typeof(n
 int64_t cima_json_coerce_int(const cima_json *v, int64_t fallback);
 uint64_t cima_json_coerce_uint(const cima_json *v, uint64_t fallback);
 double cima_json_coerce_double(const cima_json *v, double fallback);
-bool cima_json_coerce_bool(const cima_json *v, bool fallback);
+[[gnu::pure]] bool cima_json_coerce_bool(const cima_json *v, bool fallback);
 
 #define CIMA_JSON_COERCE(v, fallback)                                                                            \
   _Generic((fallback),                                                                                           \
@@ -220,9 +220,9 @@ static inline cima_json cima_json__node(const cima_json *v) { return v ? *v : (c
 // any value above as a cima_json *, valid until the end of the enclosing block.
 #define CIMA_JSON_OF(x) ((cima_json[]){CIMA_JSON_V(x)})
 
-cima_json *cima_json__obj(cima_json *node, cima_json_member *members);
-cima_json *cima_json__arr(cima_json *node, cima_json *items);
-cima_json *cima_json__raw(cima_json *node, const char *json);
+[[gnu::returns_nonnull]] cima_json *cima_json__obj(cima_json *node, cima_json_member *members);
+[[gnu::returns_nonnull]] cima_json *cima_json__arr(cima_json *node, cima_json *items);
+[[gnu::returns_nonnull]] cima_json *cima_json__raw(cima_json *node, const char *json);
 
 // `CIMA_JSON_OBJ("key", value, ...)` and `CIMA_JSON_ARR(value, ...)`. a trailing comma is fine.
 #define CIMA_JSON_OBJ(...)                                                                                       \
@@ -243,7 +243,7 @@ cima_json *cima_json__raw(cima_json *node, const char *json);
 /* node they return lives in its parent, until the parent changes again.                                     */
 
 // a deep copy into `a`, strings included. typed values are encoded into raw text on the way.
-cima_json *cima_json_clone(cilo_arena *a, const cima_json *v);
+[[gnu::returns_nonnull]] cima_json *cima_json_clone(cilo_arena *a, const cima_json *v);
 // sets `key`, replacing its value in place or appending it. returns the stored node.
 cima_json *cima_json_set(cilo_arena *a, cima_json *object, const char *key, const cima_json *value);
 // inserts `key` at `index`, clamped to the end. an existing `key` is removed first.
@@ -334,9 +334,9 @@ void cima_json_write(cima_json_writer *w, const cima_json *v);
 // encodes a typed value in place, so a struct can sit inside an ad hoc envelope.
 void cima_json_write_typed(cima_json_writer *w, const cima_schema *schema, const void *value);
 // the text so far, nul terminated and still the writer's, valid until it writes again. "" for an empty writer.
-const char *cima_json_writer_text(cima_json_writer *w);
+[[gnu::returns_nonnull]] const char *cima_json_writer_text(cima_json_writer *w);
 // nul terminates and hands the buffer over, `len` may be null. the writer is empty again.
-char *cima_json_writer_finish(cima_json_writer *w, size_t *len);
+[[gnu::returns_nonnull]] char *cima_json_writer_finish(cima_json_writer *w, size_t *len);
 // drops the buffer of a writer on the heap or an allocator.
 void cima_json_writer_dispose(cima_json_writer *w);
 
@@ -365,9 +365,9 @@ size_t cima_json_format_uint(char *out, uint64_t value);
 #define CIMA_JSON_PUT_TYPED(w, node, ptr) cima_json_write_typed(w, CIMA_SCHEMA(node), CIMA_CHECKED(node, ptr))
 
 // compact json text of `v` from `a`, nul terminated. `len` may be null.
-char *cima_json_text(cilo_allocator *a, const cima_json *v, size_t *len);
+[[gnu::returns_nonnull]] char *cima_json_text(cilo_allocator *a, const cima_json *v, size_t *len);
 // the same, indented by two spaces.
-char *cima_json_pretty(cilo_allocator *a, const cima_json *v, size_t *len);
+[[gnu::returns_nonnull]] char *cima_json_pretty(cilo_allocator *a, const cima_json *v, size_t *len);
 
 #ifdef __cplusplus
 }
