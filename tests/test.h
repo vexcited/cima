@@ -3,6 +3,7 @@
 
 #include <cilo/dsl.h>
 #include <cima/dsl.h>
+#include <stdcountof.h>
 #include <stdio.h>
 #include <string.h>
 

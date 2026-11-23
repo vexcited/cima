@@ -1,5 +1,6 @@
 #include <cilo/dsl.h>
 #include <cima/dsl.h>
+#include <stddefer.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -362,6 +363,7 @@ static void run_file(const char *path) {
     fprintf(stderr, "%s: cannot open\n", path);
     return;
   }
+  defer fclose(f);
   with_arena(data) {
     fseek(f, 0, SEEK_END);
     size_t len = (size_t)ftell(f);
@@ -372,7 +374,7 @@ static void run_file(const char *path) {
     cima_json *doc = json_parse(data, text, len, nullptr);
     if (!doc) {
       fprintf(stderr, "%s: not json\n", path);
-      continue;
+      return;
     }
     int iterations = (int)(200000000 / (len + 1)) + 1;
     size_t out = 0;
@@ -404,7 +406,6 @@ static void run_file(const char *path) {
 #endif
     cilo_arena_drop(&work);
   }
-  fclose(f);
 }
 
 int main(int argc, char **argv) {

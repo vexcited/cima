@@ -332,7 +332,7 @@ static const json_case overflow[] = {
 };
 
 static void suite(void) {
-  for (size_t i = 0; i < sizeof accept / sizeof *accept; i++) {
+  for (size_t i = 0; i < countof(accept); i++) {
     const json_case *t = &accept[i];
     with_arena(a) {
       cima_json_error err = {};
@@ -352,7 +352,7 @@ static void suite(void) {
       }
     }
   }
-  for (size_t i = 0; i < sizeof reject / sizeof *reject; i++) {
+  for (size_t i = 0; i < countof(reject); i++) {
     const json_case *t = &reject[i];
     with_arena(a) {
       cima_json_error err = {};
@@ -371,7 +371,7 @@ static void suite(void) {
 }
 
 static void overflowing(void) {
-  for (size_t i = 0; i < sizeof overflow / sizeof *overflow; i++) {
+  for (size_t i = 0; i < countof(overflow); i++) {
     const json_case *t = &overflow[i];
     with_arena(a) {
       CHECK(cima_json_valid(t->text, t->len));

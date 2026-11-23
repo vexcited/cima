@@ -15,7 +15,7 @@ object(Search,
 
 object(Strict, u8() a, options(strict()));
 
-#define PAIRS(...) ((const cima_pair[]){__VA_ARGS__}), sizeof((const cima_pair[]){__VA_ARGS__}) / sizeof(cima_pair)
+#define PAIRS(...) ((const cima_pair[]){__VA_ARGS__}), countof((const cima_pair[]){__VA_ARGS__})
 
 static void query(void) {
   with_arena(a) {

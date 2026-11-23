@@ -261,7 +261,7 @@ static void formats(void) {
     {CIMA_FORMAT_HOSTNAME, "a_b.com", false},
     {CIMA_FORMAT_HOSTNAME, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com", false},
   };
-  for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+  for (size_t i = 0; i < countof(cases); i++) {
     const format_case *t = &cases[i];
     cima_schema s = {.kind = CIMA_KIND_STRING, .size = sizeof(cima_string), .align = alignof(cima_string)};
     s.string.format = t->format;
@@ -422,7 +422,7 @@ static int roles_of(const Team *t) {
 // a list in a const struct and a const list walk like any other, with their items' constness kept.
 static void const_lists(void) {
   Role roles[] = {Role_admin, Role_guest, Role_member};
-  const Team team = {.name = "core", .roles = {roles, 3, 3}};
+  const Team team = {.name = "core", .roles = {roles, countof(roles), countof(roles)}};
   CHECK(roles_of(&team) == 12);
   const Role_list all = team.roles;
   int seen = 0;

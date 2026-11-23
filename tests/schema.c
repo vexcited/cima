@@ -167,7 +167,7 @@ static void openapi(void) {
     cima_json *schemas = json_at(doc, "/components/schemas");
     CHECK(json_len(schemas) == 4);
     const char *names[] = {"User", "Shape", "Role", "Address"};
-    for (size_t i = 0; i < 4 && i < json_len(schemas); i++) CHECK_STR(schemas->members[i].key, names[i]);
+    for (size_t i = 0; i < countof(names) && i < json_len(schemas); i++) CHECK_STR(schemas->members[i].key, names[i]);
     CHECK_STR(json_or(json_at(doc, "/components/schemas/User/properties/role/$ref"), ""),
               "#/components/schemas/Role");
   }

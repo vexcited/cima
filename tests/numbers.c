@@ -214,7 +214,7 @@ static void format_edges(void) {
     2.2250738585072011e-308, 2.2250738585072014e-308, 1.7976931348623157e308, 4.9406564584124654e-324, 1.0 / 3,
     2.0 / 3, M_PI, M_E, 100.0 / 3,
   };
-  for (size_t i = 0; i < sizeof fixed / sizeof *fixed; i++) {
+  for (size_t i = 0; i < countof(fixed); i++) {
     check_format(fixed[i]);
     check_format(-fixed[i]);
   }
@@ -227,7 +227,7 @@ static void format_edges(void) {
     {1.234567890123e-5, "0.00001234567890123"},  {1.2345678901234e-5, "1.2345678901234e-5"},
     {DBL_MAX, "1.7976931348623157e+308"},          {123456789012345.67, "123456789012345.67"},
   };
-  for (size_t i = 0; i < sizeof known / sizeof *known; i++) {
+  for (size_t i = 0; i < countof(known); i++) {
     char out[CIMA_JSON_NUMBER_MAX];
     out[cima__fmt_double(out, known[i].v)] = '\0';
     CHECK_STR(out, known[i].text);
@@ -359,14 +359,14 @@ static void parse_edges(void) {
     "0.1", "0.3", "1e23", "8.98846567431158e307", "1.0e-307", "4.4501477170144023e-308", "3.4028236692093846e38",
     "0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
   };
-  for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) check_parse_str(cases[i]);
+  for (size_t i = 0; i < countof(cases); i++) check_parse_str(cases[i]);
   // integer parts around every bound the scanner switches at, then fractions of every length.
   static const char *const bounds[] = {
     "1842", "1843", "1844", "1845", "184467440735", "184467440736", "184467440737", "184467440738",
     "1844674407370955160", "1844674407370955161", "1844674407370955162", "18446744073709551615",
     "18446744073709551616", "0", "9", "99999999", "9999999999999999", "100000000",
   };
-  for (size_t i = 0; i < sizeof bounds / sizeof *bounds; i++) {
+  for (size_t i = 0; i < countof(bounds); i++) {
     for (int digits = 0; digits <= 30; digits++) {
       for (int round = 0; round < 8; round++) {
         char text[96];

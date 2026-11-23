@@ -593,7 +593,7 @@ close:
   items_end = stack[depth].stop;
   goto array;
 push:
-  if (UNLIKELY(depth == sizeof stack / sizeof *stack)) {
+  if (UNLIKELY(depth == countof(stack))) {
     d = dw_value(w, d, child);
     limit = w->buf + w->cap;
     DW_ROOM(2);
@@ -1539,7 +1539,7 @@ bool cima_json_coerce_bool(const cima_json *v, bool fallback) {
   case CIMA_JSON_DOUBLE: return v->d != 0;
   case CIMA_JSON_STRING: {
     static const char *const yes[] = {"true", "1", "on", "yes"}, *const no[] = {"false", "0", "off", "no"};
-    for (int i = 0; i < 4; i++) {
+    for (size_t i = 0; i < countof(yes); i++) {
       if (strcmp(v->str, yes[i]) == 0) return true;
       if (strcmp(v->str, no[i]) == 0) return false;
     }

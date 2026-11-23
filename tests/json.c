@@ -556,7 +556,7 @@ static void strings_at_random(void) {
       // one byte made invalid in some of them.
       size_t broken = rng(4) ? SIZE_MAX : rng((uint32_t)len);
       static const unsigned char bad[] = {0xff, 0x80, 0xc0, 0x01, 0xed, 0xf5};
-      if (broken != SIZE_MAX) text[broken] = (char)bad[rng(sizeof bad)];
+      if (broken != SIZE_MAX) text[broken] = (char)bad[rng(countof(bad))];
       cima_json *doc = json_parse(a, text, len, nullptr);
       if (broken == SIZE_MAX) {
         CHECK(doc && json_len(doc) == count && cima_json_valid(text, len));

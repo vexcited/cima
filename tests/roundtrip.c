@@ -109,7 +109,7 @@ static void doubles(void) {
     {-2.5e-5, "-0.000025"},
   };
   cima_json_writer w = {};
-  for (size_t i = 0; i < sizeof known / sizeof *known; i++) {
+  for (size_t i = 0; i < countof(known); i++) {
     cima_json_write_double(&w, known[i].value);
     char *text = cima_json_writer_finish(&w, nullptr);
     CHECK_STR(text, known[i].text);
@@ -158,7 +158,7 @@ static void doubles(void) {
 static void integers(void) {
   with_arena(a) {
     static const char *const texts[] = {"0", "-1", "9223372036854775807", "-9223372036854775808"};
-    for (size_t i = 0; i < 4; i++) {
+    for (size_t i = 0; i < countof(texts); i++) {
       int64_t v;
       CHECK(CIMA_PARSE(i64(), texts[i], &v, .arena = a).ok);
       CHECK_STR(CIMA_TO_JSON(i64(), &v, .arena = a), texts[i]);
@@ -201,11 +201,11 @@ static void strings(void) {
 static void locales(void) {
   const char *names[] = {"de_DE.UTF-8", "fr_FR.UTF-8", "de_DE", "fr_FR"};
   bool set = false;
-  for (size_t i = 0; i < 4 && !set; i++) set = setlocale(LC_ALL, names[i]) != nullptr;
+  for (size_t i = 0; i < countof(names) && !set; i++) set = setlocale(LC_ALL, names[i]) != nullptr;
   if (!set) return;
   with_arena(a) {
     double values[] = {0.5, 1e-7, 1.7976931348623157e308, 123456.789, 5e-324};
-    for (size_t i = 0; i < 5; i++) {
+    for (size_t i = 0; i < countof(values); i++) {
       char *text = CIMA_TO_JSON(number(), &values[i], .arena = a);
       CHECK(strchr(text, ',') == nullptr);
       double back;

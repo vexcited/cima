@@ -1,4 +1,5 @@
 #include <cima/cima.h>
+#include <stdcountof.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -39,7 +40,7 @@ int main(void) {
     .size = sizeof(cima_string) + sizeof(cima_u16) + 6,
     .align = alignof(cima_string),
     .fields = fields,
-    .fields_count = 2,
+    .fields_count = countof(fields),
   };
 
   alignas(cima_string) unsigned char storage[sizeof(cima_string) + 8] = {};

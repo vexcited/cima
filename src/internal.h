@@ -3,6 +3,7 @@
 
 #include <cima/json.h>
 #include <stdckdint.h>
+#include <stdcountof.h>
 #include <stdio.h>
 #include <string.h>
 

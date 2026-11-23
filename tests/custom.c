@@ -136,7 +136,7 @@ static void decoding(void) {
     Snowflake id;
     CHECK(cima_parse_text(&Snowflake_schema, "42", &id, &(cima_options){.arena = a}).ok && id == 42);
     cima_pair pairs[] = {{"id", "7"}, {"roles", "8"}, {"roles", "9"}, {"guild", "1"}, {"at", "{\"x\":1,\"y\":2}"}};
-    r = cima_parse_pairs(&Member_schema, pairs, 5, &m, &(cima_options){.arena = a});
+    r = cima_parse_pairs(&Member_schema, pairs, countof(pairs), &m, &(cima_options){.arena = a});
     CHECK(r.ok && m.id == 7 && m.roles.len == 2 && m.roles.items[1] == 9);
   }
 }
@@ -146,7 +146,7 @@ static void encoding(void) {
     Snowflake roles[] = {1, 18446744073709551615u};
     Member m = {
         .id = 175928847299117063u,
-        .roles = {roles, 2, 0},
+        .roles = {roles, countof(roles), 0},
         .guild = 9,
         .color = {true, {0x12, 0x34, 0x56, nullptr}},
         .at = {1, 2},

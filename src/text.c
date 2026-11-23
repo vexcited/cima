@@ -251,7 +251,7 @@ size_t cima__fmt_timestamp(char *out, int64_t ms) {
   char *p = out;
   int fields[] = {(int)y / 100, (int)y % 100, m, d, h, mi, s};
   static const char seps[] = "\0\0--T::";
-  for (int i = 0; i < 7; i++) {
+  for (size_t i = 0; i < countof(fields); i++) {
     if (seps[i]) *p++ = seps[i];
     *p++ = (char)('0' + fields[i] / 10);
     *p++ = (char)('0' + fields[i] % 10);
