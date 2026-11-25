@@ -99,15 +99,22 @@ static inline bool cima__same(const char *a, const char *b, size_t len) {
 static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "the string scanners read words little endian");
 
 // vector paths per cpu, every one with a scalar twin that other cpus take and CIMA_NO_SIMD forces. code outside
-// this file sees 16 byte blocks as cima__v16 through the helpers below, which each cpu provides: neon on arm64
-// for now.
+// this file sees 16 byte blocks as cima__v16 through the helpers below, which each cpu provides: neon on arm64,
+// and ssse3 on x86 where the build may count on it, -march=native or x86-64-v2 for instance. the lookups that
+// check utf-8 need its byte shuffle.
 #if defined(__ARM_NEON) && defined(__aarch64__) && !defined(CIMA_NO_SIMD)
 #include <arm_neon.h>
 #define CIMA__NEON 1
 #else
 #define CIMA__NEON 0
 #endif
-#define CIMA__SIMD CIMA__NEON
+#if defined(__SSSE3__) && !CIMA__NEON && !defined(CIMA_NO_SIMD)
+#include <immintrin.h>
+#define CIMA__SSE 1
+#else
+#define CIMA__SSE 0
+#endif
+#define CIMA__SIMD (CIMA__NEON || CIMA__SSE)
 
 constexpr uint64_t CIMA__ONES = 0x0101010101010101ull;
 constexpr uint64_t CIMA__HIGHS = 0x8080808080808080ull;
@@ -234,6 +241,128 @@ typedef struct cima__utf8 {
 }
 
 static inline bool cima__utf8_bad(const cima__utf8 *s) { return cima__any16(vorrq_u8(s->error, s->incomplete)); }
+#elif CIMA__SSE
+typedef __m128i cima__v16;
+
+static inline cima__v16 cima__load16(const char *p) { return _mm_loadu_si128((const __m128i *)(const void *)p); }
+static inline void cima__store16(char *p, cima__v16 v) { _mm_storeu_si128((__m128i *)(void *)p, v); }
+static inline bool cima__any16(cima__v16 v) {
+  return _mm_movemask_epi8(_mm_cmpeq_epi8(v, _mm_setzero_si128())) != 0xffff;
+}
+
+// the first k bytes of v at p, k below 16, and nothing past them. returns p + k.
+static inline char *cima__store_first16(char *p, cima__v16 v, unsigned k) {
+  if (k & 8) {
+    _mm_storel_epi64((__m128i *)(void *)p, v);
+    v = _mm_srli_si128(v, 8);
+    p += 8;
+  }
+  uint64_t x = (uint64_t)_mm_cvtsi128_si64(v);
+  if (k & 4) {
+    uint32_t y = (uint32_t)x;
+    memcpy(p, &y, 4);
+    x >>= 32;
+    p += 4;
+  }
+  if (k & 2) {
+    uint16_t y = (uint16_t)x;
+    memcpy(p, &y, 2);
+    x >>= 16;
+    p += 2;
+  }
+  if (k & 1) *p++ = (char)x;
+  return p;
+}
+
+// the masks below hold a bit a lane, the first lane lowest: cima__lane gives the first one set.
+static inline unsigned cima__lane(uint64_t mask) { return (unsigned)__builtin_ctzll(mask); }
+
+static inline __m128i cima__quotes16(cima__v16 v) {
+  return _mm_or_si128(_mm_cmpeq_epi8(v, _mm_set1_epi8('"')), _mm_cmpeq_epi8(v, _mm_set1_epi8('\\')));
+}
+
+// cima__special of 16 bytes, exact on every lane: a signed compare takes control characters and bytes past ascii
+// at once.
+static inline uint64_t cima__special16(cima__v16 v) {
+  __m128i m = _mm_or_si128(cima__quotes16(v), _mm_cmplt_epi8(v, _mm_set1_epi8(0x20)));
+  return (uint64_t)(unsigned)_mm_movemask_epi8(m);
+}
+
+// what ends a run of text that utf-8 checks can go through: quotes, backslashes and control characters.
+static inline uint64_t cima__stops16(cima__v16 v) {
+  __m128i control = _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(0x1f)), v);
+  return (uint64_t)(unsigned)_mm_movemask_epi8(_mm_or_si128(cima__quotes16(v), control));
+}
+
+// the first k bytes of v, the others zero.
+static inline cima__v16 cima__first16(cima__v16 v, unsigned k) {
+  const __m128i iota = _mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+  return _mm_and_si128(v, _mm_cmpgt_epi8(_mm_set1_epi8((char)k), iota));
+}
+
+// utf-8 checked 16 bytes at a time, after keiser and lemire, as the neon one above: its tables and its steps.
+typedef struct cima__utf8 {
+  cima__v16 prev, error, incomplete;
+} cima__utf8;
+
+[[gnu::always_inline]] static inline void cima__utf8_next(cima__utf8 *s, cima__v16 in) {
+  if (!_mm_movemask_epi8(in)) {
+    s->error = _mm_or_si128(s->error, s->incomplete);
+    s->incomplete = _mm_setzero_si128();
+    s->prev = in;
+    return;
+  }
+  enum : uint8_t {
+    TOO_SHORT = 1, TOO_LONG = 2, OVERLONG_3 = 4, TOO_LARGE = 8, SURROGATE = 16, OVERLONG_2 = 32,
+    TOO_LARGE_1000 = 64, OVERLONG_4 = 64, TWO_CONTS = 128, CARRY = TOO_SHORT | TOO_LONG | TWO_CONTS,
+  };
+  alignas(16) static const uint8_t high1[16] = {
+    TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG,
+    TWO_CONTS, TWO_CONTS, TWO_CONTS, TWO_CONTS,
+    TOO_SHORT | OVERLONG_2, TOO_SHORT, TOO_SHORT | OVERLONG_3 | SURROGATE,
+    TOO_SHORT | TOO_LARGE | TOO_LARGE_1000 | OVERLONG_4,
+  };
+  alignas(16) static const uint8_t low1[16] = {
+    CARRY | OVERLONG_3 | OVERLONG_2 | OVERLONG_4, CARRY | OVERLONG_2, CARRY, CARRY,
+    CARRY | TOO_LARGE, CARRY | TOO_LARGE | TOO_LARGE_1000, CARRY | TOO_LARGE | TOO_LARGE_1000,
+    CARRY | TOO_LARGE | TOO_LARGE_1000, CARRY | TOO_LARGE | TOO_LARGE_1000, CARRY | TOO_LARGE | TOO_LARGE_1000,
+    CARRY | TOO_LARGE | TOO_LARGE_1000, CARRY | TOO_LARGE | TOO_LARGE_1000, CARRY | TOO_LARGE | TOO_LARGE_1000,
+    CARRY | TOO_LARGE | TOO_LARGE_1000 | SURROGATE, CARRY | TOO_LARGE | TOO_LARGE_1000,
+    CARRY | TOO_LARGE | TOO_LARGE_1000,
+  };
+  alignas(16) static const uint8_t high2[16] = {
+    TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+    TOO_LONG | OVERLONG_2 | TWO_CONTS | OVERLONG_3 | TOO_LARGE_1000 | OVERLONG_4,
+    TOO_LONG | OVERLONG_2 | TWO_CONTS | OVERLONG_3 | TOO_LARGE,
+    TOO_LONG | OVERLONG_2 | TWO_CONTS | SURROGATE | TOO_LARGE,
+    TOO_LONG | OVERLONG_2 | TWO_CONTS | SURROGATE | TOO_LARGE,
+    TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+  };
+  alignas(16) static const uint8_t last[16] = {
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0xf0 - 1, 0xe0 - 1, 0xc0 - 1,
+  };
+  const __m128i nibble = _mm_set1_epi8(0x0f);
+  // the byte before each one, the last of the block before first.
+  __m128i prev1 = _mm_alignr_epi8(in, s->prev, 15);
+  __m128i special = _mm_and_si128(
+    _mm_and_si128(
+      _mm_shuffle_epi8(_mm_load_si128((const __m128i *)(const void *)high1),
+                       _mm_and_si128(_mm_srli_epi16(prev1, 4), nibble)),
+      _mm_shuffle_epi8(_mm_load_si128((const __m128i *)(const void *)low1), _mm_and_si128(prev1, nibble))),
+    _mm_shuffle_epi8(_mm_load_si128((const __m128i *)(const void *)high2),
+                     _mm_and_si128(_mm_srli_epi16(in, 4), nibble)));
+  // the second byte after a lead of three or four, and the third after a lead of four.
+  __m128i third = _mm_subs_epu8(_mm_alignr_epi8(in, s->prev, 14), _mm_set1_epi8((char)(0xe0 - 0x80)));
+  __m128i fourth = _mm_subs_epu8(_mm_alignr_epi8(in, s->prev, 13), _mm_set1_epi8((char)(0xf0 - 0x80)));
+  __m128i must = _mm_and_si128(_mm_or_si128(third, fourth), _mm_set1_epi8((char)0x80));
+  s->error = _mm_or_si128(s->error, _mm_xor_si128(must, special));
+  s->incomplete = _mm_subs_epu8(in, _mm_load_si128((const __m128i *)(const void *)last));
+  s->prev = in;
+}
+
+static inline bool cima__utf8_bad(const cima__utf8 *s) {
+  return cima__any16(_mm_or_si128(s->error, s->incomplete));
+}
 #endif
 
 // the first byte from p on that a string does not hold as it is, in text padded with nul bytes. for runs past
