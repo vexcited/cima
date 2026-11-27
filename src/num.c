@@ -48,9 +48,20 @@ cima__int_status cima__num_magnitude(const cima__num *n, uint64_t *out) {
   return CIMA__INT_OK;
 }
 
+// windows has the same, under other names.
+#if defined(_WIN32)
+typedef _locale_t locale_t;
+#define strtod_l _strtod_l
+#endif
+
 static locale_t c_locale;
 static pthread_once_t c_locale_once = PTHREAD_ONCE_INIT;
+
+#if defined(_WIN32)
+static void make_c_locale(void) { c_locale = _create_locale(LC_ALL, "C"); }
+#else
 static void make_c_locale(void) { c_locale = newlocale(LC_ALL_MASK, "C", (locale_t)0); }
+#endif
 
 static locale_t the_c_locale(void) {
   pthread_once(&c_locale_once, make_c_locale);

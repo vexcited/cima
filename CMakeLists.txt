@@ -44,6 +44,10 @@ find_library(CIMA_LIBM m)
 if(CIMA_LIBM)
   target_link_libraries(cima PRIVATE ${CIMA_LIBM})
 endif()
+# windows has no regcomp of its own, msys2's tre gives it.
+if(WIN32)
+  target_link_libraries(cima PUBLIC systre)
+endif()
 set_target_properties(cima PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(CIMA_BUILD_TESTS)
@@ -60,6 +64,11 @@ if(CIMA_BUILD_TESTS)
     target_compile_options(${target} PRIVATE ${CIMA_C2Y} -Wall -Wextra -Wpedantic)
     # glibc hides M_PI under a strict -std.
     target_compile_definitions(${target} PRIVATE $<$<NOT:$<PLATFORM_ID:Darwin>>:_GNU_SOURCE>)
+    # _GNU_SOURCE turns on mingw's own printf, which writes subnormals wrong on arm64, and the tests check
+    # against printf. the ucrt's is right.
+    if(WIN32)
+      target_compile_definitions(${target} PRIVATE __USE_MINGW_ANSI_STDIO=0)
+    endif()
     add_test(NAME ${target} COMMAND ${target})
   endforeach()
   add_executable(cima_bench bench/bench.c)
